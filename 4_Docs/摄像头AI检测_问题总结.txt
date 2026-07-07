@@ -1,0 +1,189 @@
+================================================================
+  摄像头 AI 检测 — 问题完整总结
+  日期: 2026-07-05 ~ 07-07
+  板子: QSM368ZP-WF (RK3568, 2GB RAM, Linux 4.19)
+  摄像头: USB UVC Microdia (0c45:64ab), /dev/video23, MJPEG 640x480
+  NPU 模型: YOLOv5s (yolov5s-640-640.rknn, 8MB)
+  推理程序: /data/yolo/rknn_yolov5_demo (RKNN SDK 2.3.2)
+================================================================
+
+一、硬件配置
+──────────────────────────────────────────
+- CPU: RK3568 ARM Cortex-A55 ×4
+- RAM: 2GB DDR4 (可用约 1.7GB)
+- GPU: Mali-G52 (通过 drm_show 软件渲染→管道→DRM直显)
+- NPU: 内置 1TOPS (通过 rknn_yolov5_demo 子进程调用)
+- RGA: 硬件图像缩放/格式转换 (rga2, 同时被 v4l2 和 NPU 使用)
+- 摄像头: USB UVC MJPEG 640x480@15fps, 设备 /dev/video23
+- 显示: SONY ECX336C Micro OLED 640×400, 通过 drm_show 驱动
+
+二、软件架构
+──────────────────────────────────────────
+HUD 导航系统 (main.py) 启动时同时运行:
+  - GPS 线程 (1Hz, /dev/ttyS8 串口)
+  - HUD 线程 (30fps, pygame软件渲染+drm_show管道)
+  - 语音线程 (Piper TTS 离线合成+aplay播放)
+  - 语音命令线程 (Vosk 50MB模型持续监听+唤醒词)
+  - HTTP 服务线程 (端口8080, 手机通信)
+  - 主循环 1Hz (导航决策+路线规划)
+
+摄像头 AI 管线 (尝试添加):
+  camera_manager.py → v4l2-ctl 子进程持续采集 MJPEG
+  → 内存队列 deque(maxlen=3) → ai_monitor.py 取帧
+  → rknn_yolov5_demo NPU推理 → ai_alert.py 防抖
+  → nav_state.camera_alert_level → HUD 红色框闪烁
+
+三、实验记录 (按时间顺序)
+──────────────────────────────────────────
+
+实验1: NPU 单独推理
+  命令: /data/yolo/rknn_yolov5_demo model out.jpg
+  结果: ✅ 成功, 58.9ms/帧, RGA resize正常
+  结论: NPU硬件和模型没问题
+
+实验2: 摄像头单独采集
+  命令: v4l2-ctl --stream-mmap --stream-count=1 --stream-to=/tmp/test.jpg
+  结果: ✅ 成功, 54KB JPEG帧, 连续15秒不掉帧
+  结论: USB摄像头和v4l2驱动正常
+
+实验3: 摄像头 + NPU 同时运行 (无导航系统)
+  脚本: 只开 camera_manager + ai_monitor, 不启动 main.py
+  结果: ✅ 存活15秒+, 帧数持续增长, 进程未崩溃
+  结论: 相机+NPU可以共存
+
+实验4: 摄像头 + 导航全系统 (作为线程启动)
+  方式: 在 main.py 中直接 import camera_manager + ai_monitor 并启动
+  结果: ❌ 进程在摄像头启动后1-3秒内被内核静默杀掉
+  崩溃特征:
+    - 无 Python traceback
+    - 无 OOM kill 记录 (dmesg 无 oom)
+    - 无 segfault 记录
+    - 无 "exited" 日志 (不是正常退出)
+    - guard.sh 的 grep -c 'exited' 显示 0
+    - 但 ps 显示 python 进程已消失
+    - 累计崩溃113次 (在30秒重启循环中)
+  结论: 全部模块一起跑时进程被内核静默杀死
+
+实验5: 尝试降配 (320x240@5fps)
+  修改: camera_config.py WIDTH=320 HEIGHT=240 FPS=5
+  结果: ❌ 同样崩溃, 降配无效
+  结论: 不是带宽问题
+
+实验6: 尝试延迟启动 (15秒, 60秒)
+  修改: 在 main.py 中用 threading.Timer 延迟启动摄像头
+  结果: ❌ 延迟15秒后仍崩溃 (113次); 延迟60秒后仍崩溃
+  结论: 不是启动时序问题
+
+实验7: 摄像头单独 + NPU 单独 + 导航全系统 对照实验
+  实验A: 只摄像头 (无NPU) → ✅ 15秒+, 861帧
+  实验B: 只NPU (无摄像头) → ✅ 58.9ms/帧
+  实验C: 相机+NPU (无导航) → ✅ 15秒+
+  实验D: 全系统+相机+NPU → ❌ 静默死
+  结论: 导航全系统(HUD+GPS+语音+Vosk)和相机NPU管线冲突
+
+实验8: 内核日志检查
+  命令: dmesg | grep -iE 'rga|oom|kill|fault|error'
+  发现:
+    - GPS串口: "ttyS8 - failed to request DMA, use interrupt mode"
+    - 显示: "vop2_crtc_atomic_enable Update mode to 1280x720p60"
+    - 无 OOM kill
+    - 无 segfault
+    - 无 rga error
+    - 进程消失但内核无任何记录
+  结论: 是某种内核调度层面的静默杀进程,不是OOM也不是panic
+
+实验9: 尝试独立进程 (camera_daemon.py)
+  方案: 摄像头AI作为独立Python进程运行,与 main.py 分离
+  结果: ❌ 未测试完成即放弃, 因为独立进程共享同一个内核,
+        同样会触发 RGA/DMA 冲突
+
+实验10: 孤儿进程问题
+  发现: main.py崩溃后, v4l2-ctl 子进程(setsid启动)不会被杀,
+        成为孤儿进程持续占用 /dev/video23
+  表现: 下次启动报 "Device or resource busy"
+  修复: camera_manager.open() 中加 killall -9 v4l2-ctl
+
+四、根因分析
+──────────────────────────────────────────
+最可能的原因 (按可能性排序):
+
+1. RGA 硬件竞态 (可能性: 高)
+   RGA (Raster Graphics Accelerator) 被 v4l2 (摄像头格式转换) 和
+   NPU (图像缩放 resize) 同时使用。RGA 是单实例硬件,不支持并发。
+   一个进程占用 RGA 时另一个进程访问会触发内核驱动错误。
+
+   证据: NPU推理日志中有 "rga_api version 1.3.2" 和 "resize with RGA!"
+   摄像头使用 v4l2 的 MJPEG 解码也用 RGA 做格式转换。
+
+2. IOMMU/DMA 通道耗尽 (可能性: 中)
+   RK3568 DMA 通道有限。GPS串口已报 "failed to request DMA"。
+   HUD drm_show 使用 DRM/VOP 的 DMA, 摄像头 v4l2 使用 USB DMA,
+   NPU 使用内部 DMA, 全部同时激活时可能超出 IOMMU 映射限制。
+
+3. 内存碎片化 (可能性: 低)
+   2GB RAM, Vosk模型50MB + Piper模型61MB + YOLO模型8MB +
+   Python~60MB + pygame~17MB + 系统~300MB = ~496MB。
+   剩余1.5GB,不应OOM。且dmesg无OOM记录。
+
+五、已验证可行的替代方案
+──────────────────────────────────────────
+1. ESP32-S3 + 摄像头模块: 独立MCU做视觉检测和AI推理,
+   通过UART串口发送检测结果给RK3568。不占用RK3568任何资源。
+
+2. 更高规格主控: RK3588 有更多DMA通道和独立NPU,
+   理论上不会冲突。
+
+3. 软件规避: 在导航空闲时(停车/低速)手动开启摄像头,
+   关闭HUD渲染和语音识别,释放资源。但需要用户在App中手动切换。
+
+六、已确认无问题的改动
+──────────────────────────────────────────
+以下改动已经过验证,与摄像头问题无关,可以保留:
+
+- guard.sh 启动前 killall weston (HUD正常显示)
+- guard.sh 循环末尾 killall python3 drm_show (防设备抢占)
+- voice_alert_c.py 5级语音降级链 (Piper→WAV→Beep)
+- voice_alert_c.py 异常保护 (单条语音失败不终止线程)
+- voice_alert_c.py BusyBox aplay -d 浮点数兼容
+- voice_alert_c.py pre_cache 改用 synthesize() 不播放
+- voice_alert_c.py TTS缓存 200文件上限
+- voice_command.py 纯Vosk识别 (删Whisper+MFCC)
+- voice_command.py 唤醒词 "小正小正" + 声纹验证(同段录音)
+- voice_command.py 唤醒窗口计数替代时间戳
+- gps_reader_a.py sleep(0.05) 防忙等
+- gps_reader_a.py 串口异常自动重连
+- main.py GPS非阻塞启动 (删35秒阻塞等待)
+- main.py 取消导航清除 is_arrived
+- main.py analyze_route try/except 防崩溃
+- main.py 网络检测用 check_network() 替代 is_available()
+- ai_alert.py threading.Lock 保护全局变量
+- ai_alert.py reset_alert 全量清除
+- hud_display_c.py 真实 camera_alert_level 替代虚假告警
+- hud_display_c.py 底部栏 Surface 预分配复用
+- http_server.py /places/rename + /places/add 移入 do_POST
+- http_server.py JSON解析 try/except
+- route_planner_b.py 提取公共 _point_to_segment_m
+- smart_features.py _atomic_write fd泄漏修复
+- smart_features.py _ride_points 5000点上限
+- S99hudnavi 5份统一为1份权威版
+- WiFi固定IP 10.203.69.160 (S99hudnavi中添加)
+- camera_config.py DEVICE=/dev/video23 (USB UVC)
+
+七、文件清单
+──────────────────────────────────────────
+新增:
+  _board_ci.sh          — 板上CI检查(9类74项)
+  _voice_cam_diag.py    — 语音+摄像头专项诊断
+  _hud_diag.py          — HUD显示诊断
+  _board_full_diag.sh   — 全板诊断
+  _live_test.sh/_nav_test.py — 实时导航测试
+  requirements.txt      — Python依赖
+
+修改:
+  main.py, guard.sh, voice_alert_c.py, voice_command.py,
+  hud_display_c.py, http_server.py, gps_reader_a.py,
+  ai_alert.py, route_planner_b.py, smart_features.py,
+  camera_config.py, S99hudnavi, config.py, nav_state.py
+
+删除:
+  drm_display.py, whisper_asr.py, 3个重复S99hudnavi

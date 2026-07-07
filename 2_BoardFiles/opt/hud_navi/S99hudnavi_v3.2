@@ -1,0 +1,22 @@
+#!/bin/sh
+mount -o remount,rw / 2>/dev/null
+rm -rf /opt/hud_navi/__pycache__ 2>/dev/null
+
+# WiFi
+sleep 5
+if [ -f /opt/hud_navi/data/wifi_saved.json ]; then
+    SSID=$(/opt/miniforge3/bin/python3 -c "import json;print(json.load(open('/opt/hud_navi/data/wifi_saved.json'))['ssid'])")
+    PSK=$(/opt/miniforge3/bin/python3 -c "import json;print(json.load(open('/opt/hud_navi/data/wifi_saved.json'))['psk'])")
+    for i in 1 2 3 4 5; do
+        wpa_passphrase "$SSID" "$PSK" > /tmp/wpa.conf
+        wpa_supplicant -B -i wlan0 -c /tmp/wpa.conf -D nl80211 2>/dev/null
+        sleep 3
+        udhcpc -i wlan0 -t 3 -n 2>/dev/null
+        ifconfig wlan0 | grep -q "inet " && break
+        sleep 3
+    done
+fi
+
+# start-stop-daemon 保活, 永不死亡
+start-stop-daemon -S -b -m -p /tmp/hud.pid -x /bin/sh -- /opt/hud_navi/guard.sh
+echo "HUD guard started (PID: $(cat /tmp/hud.pid 2>/dev/null))"

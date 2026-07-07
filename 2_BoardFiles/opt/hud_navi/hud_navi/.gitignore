@@ -1,0 +1,24 @@
+# 用户数据
+data/map.osm
+data/tiles/
+data/trips.json
+data/rides/
+data/voiceprint.json
+data/commands.json
+
+# 临时文件
+/tmp/
+tmp/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# 密钥/敏感信息
+# config.py 中的 API Key 请用环境变量替代
+
+# 运行时日志
+*.log
+
+# 部署脚本中的敏感信息
+# S99hudnavi 中的 WiFi 密码

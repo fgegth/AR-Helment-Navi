@@ -1,0 +1,195 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>HUD 导航</title>
+<style>:root{--bg:#F2F2F7;--card:#FFF;--blue:#007AFF;--blued:#0056CC;--text:#1C1C1E;--sub:#8E8E93;--tint:#C7C7CC;--sep:#E5E5EA;--g:#34C759;--y:#FF9500;--r:#FF3B30;--o:#FF6B35;--shadow:0 2px 12px rgba(0,0,0,.06);--rad:16px}
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased;padding-bottom:60px}.header{background:rgba(255,255,255,.85);backdrop-filter:blur(20px);padding:14px 20px;display:flex;align-items:center;gap:10px;border-bottom:.5px solid var(--sep);position:sticky;top:0;z-index:100}.header h1{font-size:1.2rem;font-weight:700;letter-spacing:-.02em;flex:1}.sdot{width:10px;height:10px;border-radius:50%;background:var(--tint);flex-shrink:0;transition:background .3s}.sdot.on{background:var(--g);box-shadow:0 0 6px rgba(52,199,89,.4)}.c{padding:12px;display:flex;flex-direction:column;gap:10px;max-width:480px;margin:0 auto}.tabs{display:flex;background:rgba(118,118,128,.1);border-radius:10px;padding:2px;margin-bottom:4px}.tab{flex:1;text-align:center;padding:7px 0;font-size:.75rem;font-weight:600;color:var(--sub);border-radius:8px;cursor:pointer;transition:all .2s}.tab.on{background:var(--card);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.1)}.tab-content{display:none}.tab-content.on{display:block}.card{background:var(--card);border-radius:var(--rad);padding:16px;box-shadow:var(--shadow)}.card-title{font-size:.7rem;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}.row{display:flex;gap:6px;flex-wrap:wrap}input{flex:1;min-width:100px;height:38px;border:1.5px solid var(--sep);border-radius:10px;padding:0 10px;font-size:.9rem;background:rgba(118,118,128,.06);outline:none}.btn{height:38px;padding:0 14px;border:none;border-radius:10px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap}.btn-blue{background:var(--blue);color:#fff}.btn-blue:disabled{background:#B0D0FF}.btn-red{background:transparent;color:var(--r);border:1px solid var(--r)}.btn-sm{height:30px;padding:0 10px;font-size:.7rem;border-radius:8px;background:rgba(118,118,128,.08);color:var(--text);font-weight:500;cursor:pointer;border:none}.full-btn{width:100%;height:46px}.res{background:#F0F7FF;border:1px solid #D6EAFF;border-radius:10px;padding:10px 12px;margin-top:8px;display:none}.res .addr{font-size:.9rem;font-weight:600}.res .coord{font-size:.7rem;color:var(--sub);margin-top:2px}.map-wrap{display:none;height:320px;margin-top:10px;border-radius:var(--rad);overflow:hidden;border:1px solid var(--sep)}.map-wrap iframe{width:100%;height:100%;border:none}.place-item{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:.5px solid var(--sep);cursor:pointer}.place-item:active{background:rgba(0,0,0,.02)}.pname{font-size:.85rem;font-weight:500}.pmeta{font-size:.7rem;color:var(--sub)}.stats-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center}.stats-grid .val{font-size:1.4rem;font-weight:700}.stats-grid .lbl{font-size:.6rem;color:var(--sub)}.toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:rgba(28,28,30,.95);color:#fff;padding:10px 20px;border-radius:20px;font-size:.8rem;opacity:0;pointer-events:none;transition:opacity .3s;z-index:200}.toast.on{opacity:1}</style></head><body>
+
+<div class="header"><h1>🚲 HUD 导航</h1><div class="sdot" id="sDot"></div><span style="font-size:.7rem;color:var(--sub)" id="sLabel">离线</span></div>
+
+<div class="c">
+  <div class="tabs">
+    <div class="tab on" onclick="switchTab('nav')">🧭 导航</div>
+    <div class="tab" onclick="switchTab('places')">📍 常用</div>
+    <div class="tab" onclick="switchTab('history')">📋 记录</div>
+    <div class="tab" onclick="switchTab('analysis')">📊 分析</div>
+    <div class="tab" onclick="switchTab('settings')">⚙️ 设置</div>
+  </div>
+
+  <div id="tab-nav" class="tab-content on">
+    <div class="card">
+      <div class="card-title">搜索目的地</div>
+      <div class="row"><input id="addrInput" placeholder="输入地址，如合肥南站"><button class="btn btn-blue" onclick="searchGo()">搜索</button></div>
+      <div class="res" id="resultBox"><div class="addr">📍 <span id="rName"></span></div><div class="coord"><span id="rCoord"></span></div></div>
+      <div class="map-wrap" id="mapWrap"><div id="mapView" style="width:100%;height:100%"></div></div>
+    </div>
+    <button class="btn btn-blue full-btn" id="startBtn" onclick="startNav()" disabled>▶ 开始导航</button>
+    <button class="btn btn-red full-btn" id="cancelBtn" onclick="cancelNav()" style="display:none">■ 取消导航</button>
+    <div class="row" style="margin-top:4px"><button class="btn btn-sm" onclick="quickNav('公司')">🏢 公司</button><button class="btn btn-sm" onclick="quickNav('家')">🏠 回家</button><button class="btn btn-sm" onclick="quickNav('合肥南站')">🏛 合肥南站</button></div>
+  </div>
+
+  <div id="tab-places" class="tab-content"><div class="card"><div class="card-title">常用地点</div><div id="placesList" style="color:var(--sub);font-size:.85rem">加载中...</div></div></div>
+
+  <div id="tab-history" class="tab-content"><div class="card"><div class="card-title">骑行统计</div><div class="stats-grid" id="statsGrid"><div><div class="val">-</div><div class="lbl">总次数</div></div><div><div class="val">-</div><div class="lbl">总里程 km</div></div><div><div class="val">-</div><div class="lbl">总时长 min</div></div></div><div id="rideList" style="margin-top:8px;font-size:.75rem;color:var(--sub)"></div></div></div>
+
+  <div id="tab-analysis" class="tab-content">
+    <div class="card" style="background:linear-gradient(135deg,#007AFF,#5856D6);color:#fff"><div class="stats-grid" style="grid-template-columns:1fr 1fr 1fr 1fr"><div><div class="val" id="aKm" style="color:#fff">-</div><div class="lbl" style="color:rgba(255,255,255,.7)">总里程</div></div><div><div class="val" id="aHr" style="color:#fff">-</div><div class="lbl" style="color:rgba(255,255,255,.7)">总时长</div></div><div><div class="val" id="aSpd" style="color:#fff">-</div><div class="lbl" style="color:rgba(255,255,255,.7)">均速</div></div><div><div class="val" id="aMax" style="color:#fff">-</div><div class="lbl" style="color:rgba(255,255,255,.7)">极速</div></div></div><div style="margin-top:8px;font-size:.75rem;opacity:.9"><span id="aTrend">📈 --</span> ⏰ <span id="aPeak">--</span></div></div>
+    <div class="card" style="margin-top:8px"><div class="card-title">📊 速度分布 (km/h)</div><div id="speedBars" style="display:flex;align-items:flex-end;height:60px;gap:6px"></div><div style="display:flex;gap:6px;font-size:.6rem;color:var(--sub);margin-top:2px"><span style="flex:1;text-align:center">0-10</span><span style="flex:1;text-align:center">10-15</span><span style="flex:1;text-align:center">15-20</span><span style="flex:1;text-align:center">20-25</span><span style="flex:1;text-align:center">25+</span></div></div>
+    <div class="card" style="margin-top:8px"><div class="card-title">🏆 个人记录</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div style="background:#FFF3E0;border-radius:10px;padding:10px;text-align:center"><div style="font-size:1.2rem;font-weight:700;color:var(--o)" id="aLong">-</div><div style="font-size:.6rem;color:var(--sub)">最长单次 km</div></div><div style="background:#E8F5E9;border-radius:10px;padding:10px;text-align:center"><div style="font-size:1.2rem;font-weight:700;color:var(--g)" id="aFast">-</div><div style="font-size:.6rem;color:var(--sub)">最快 km/h</div></div><div style="background:#E3F2FD;border-radius:10px;padding:10px;text-align:center"><div style="font-size:1.2rem;font-weight:700;color:var(--blue)" id="aWk">-</div><div style="font-size:.6rem;color:var(--sub)">周均 km</div></div><div style="background:#F3E5F5;border-radius:10px;padding:10px;text-align:center"><div style="font-size:1.2rem;font-weight:700;color:#9C27B0" id="aDay">-</div><div style="font-size:.6rem;color:var(--sub)">日均 km</div></div></div></div>
+    <div class="card" style="margin-top:8px"><div class="card-title">📍 热门目的地</div><div id="topDests" style="font-size:.85rem"></div></div>
+  </div>
+
+  <div id="tab-settings" class="tab-content">
+    <div class="card"><div class="card-title">🎤 语音设置</div><div style="font-size:.65rem;color:var(--sub);margin-bottom:4px;line-height:1.5">📌 声纹录入: 请说「<b>你好我是机主</b>」三遍<br>📌 命令录入: 依次说「去公司」「回家」「取消导航」「还有多远」「开始导航」</div><div id="voiceStatus" style="font-size:.7rem;color:var(--sub);margin-bottom:8px">加载中...</div><button class="btn btn-blue" style="width:100%;margin-bottom:6px" onclick="toast('请说: 你好我是机主');sendCmd('/voice/enroll','',function(d){if(d.status=='enrolling'){toast('录音中, 请说话...');waitVoiceChange('vp',_lastVp,15,function(ok){if(ok)toast('✅ 声纹录入成功');else toast('❌ 未检测到人声, 请重试')})}else{toast('❌ 板子正忙')}});">🔒 录入声纹</button><button class="btn" style="width:100%;border:1.5px solid var(--sep);background:transparent" onclick="toast('请依次说5个命令词, 每个2秒');sendCmd('/voice/cmd_enroll','录制中...',function(){waitVoiceChange('cmds',_lastCmds,30,function(ok){if(ok)toast('✅ 命令录入成功');else toast('❌ 录入失败, 请重试')})})">📢 录入语音命令</button></div>
+    <div class="card"><div class="card-title">🌐 连接设置</div><input id="ipInput" value="10.203.69.160:8080" style="width:100%"><div style="font-size:.7rem;color:var(--sub);margin-top:4px">板子IP:端口</div><button class="btn btn-blue" style="width:100%;margin-top:6px" onclick="changeIP()">连接</button></div>
+    <div class="card"><div class="card-title">📷 AI 检测</div><button class="btn btn-blue" style="width:100%;margin-bottom:4px" onclick="sendCmd('/ai/start','AI已启动')">▶ 启动 AI 检测</button><div style="font-size:.7rem;color:var(--sub)">需USB摄像头</div></div>
+    <div class="card"><div class="card-title">🔧 系统操作</div><button class="btn btn-sm" style="width:100%;margin-bottom:4px" onclick="sendCmd('/restart','重启中...')">🔄 重启板子</button><button class="btn btn-sm" style="width:100%" onclick="sendCmd('/shutdown','关机中...')">⏻ 关闭板子</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toastEl"></div>
+
+<script src="https://webapi.amap.com/maps?v=1.4.15&key=e8d38aa4ccc5dd4bac424460304f900c"></script>
+<script>
+var URL="http://10.203.69.160:8080", WEB_KEY="6af97f35f48f772b1532efe395099ffb";
+var amap=null, amapMarker=null, amapRoute=null, startMarker=null;
+var DEST_LAT=null, DEST_LNG=null, DEST_NAME="", pollTimer=null, toastTimer=null;
+
+function $(id){return document.getElementById(id)}
+function toast(m){var t=$("toastEl");t.textContent=m;t.classList.add("on");clearTimeout(toastTimer);toastTimer=setTimeout(function(){t.classList.remove("on")},2000)}
+function switchTab(n){
+  var tabs=["nav","places","history","analysis","settings"];
+  var all=document.querySelectorAll(".tab");
+  for(var i=0;i<all.length;i++){all[i].classList.toggle("on",i==tabs.indexOf(n))}
+  for(var j=0;j<tabs.length;j++){var el=$("tab-"+tabs[j]);if(el)el.style.display=tabs[j]==n?"block":"none"}
+  if(n=="places")loadPlaces();if(n=="history")loadHistory();if(n=="analysis")loadAnalysis()
+}
+
+// ═══ 连接 ═══
+function ping(){
+  var xhr=new XMLHttpRequest();xhr.open("GET",URL+"/ping",true);xhr.timeout=5000;
+  xhr.onload=function(){
+    if(xhr.status==200){try{var d=JSON.parse(xhr.responseText);if(d.status=="alive"){$("sDot").className="sdot on";$("sLabel").textContent="已连接";toast("✅ 已连接");return}}catch(e){}}
+    $("sDot").className="sdot";$("sLabel").textContent="离线";toast("❌ 板子无响应")
+  };
+  xhr.onerror=function(){$("sDot").className="sdot";$("sLabel").textContent="离线";toast("❌ 连接失败")};
+  xhr.ontimeout=function(){$("sDot").className="sdot";$("sLabel").textContent="离线";toast("❌ 超时")};
+  xhr.send()
+}
+function changeIP(){URL=$("ipInput").value.trim();if(URL.indexOf("http")!=0)URL="http://"+URL;$("sDot").className="sdot";$("sLabel").textContent="连接中...";ping()}
+var _lastVoiceTime=0;
+var _lastVp=0, _lastCmds=0;
+function loadVoiceStatus(cb){
+  fetch(URL+"/voice/status").then(function(r){return r.json()}).then(function(d){
+    _lastVp=d.voiceprints;_lastCmds=d.commands;
+    $("voiceStatus").innerHTML="声纹:"+d.voiceprints+"人 | 命令:"+d.commands+"条 | 语音包:"+d.wav_prompts+"个";
+    if(cb)cb(d.voiceprints,d.commands)
+  }).catch(function(){})
+}
+// 轮询等待声纹/命令数量变化 (避免固定延时竞态)
+function waitVoiceChange(type, prev, maxRetry, cb){
+  var retry=0;
+  function check(){
+    if(retry>=maxRetry){cb(false);return}
+    retry++;
+    fetch(URL+"/voice/status").then(function(r){return r.json()}).then(function(d){
+      var cur=(type=="vp"?d.voiceprints:d.commands);
+      if(cur>prev){_lastVp=d.voiceprints;_lastCmds=d.commands;$("voiceStatus").innerHTML="声纹:"+d.voiceprints+"人 | 命令:"+d.commands+"条 | 语音包:"+d.wav_prompts+"个";cb(true)}
+      else{setTimeout(check,1000)}
+    }).catch(function(){setTimeout(check,1000)})
+  }
+  setTimeout(check,4000)
+}
+function checkVoiceCmd(){
+  fetch(URL+"/status").then(function(r){return r.json()}).then(function(d){
+    if(d.voice_last_cmd&&d.voice_last_time>_lastVoiceTime){
+      _lastVoiceTime=d.voice_last_time;
+      var t=d.voice_last_cmd,raw=d.voice_last_raw||"";
+      if(t=="navigate"){toast("🎤 语音: 导航到 "+raw);switchTab("nav")}
+      else if(t=="cancel"){toast("🎤 语音: 取消导航")}
+      else if(t=="status"){toast("🎤 语音: 查询距离")}
+      else if(t=="continue"){toast("🎤 语音: 继续导航");switchTab("nav")}
+    }
+  }).catch(function(){})
+}
+setInterval(function(){fetch(URL+"/ping").then(function(r){return r.json()}).then(function(d){if(d.status=="alive"){$("sDot").className="sdot on";$("sLabel").textContent="已连接"}}).catch(function(){})},5000);
+setInterval(checkVoiceCmd,3000);
+loadVoiceStatus();
+
+// ═══ 搜索 ═══
+function searchGo(){
+  var a=$("addrInput").value.trim();if(!a){toast("请输入地址");return}
+  toast("搜索中...");
+  fetch("https://restapi.amap.com/v3/geocode/geo?key="+WEB_KEY+"&address="+encodeURIComponent(a))
+  .then(function(r){return r.json()}).then(function(d){
+    if(d.status=="1"&&d.geocodes.length>0){
+      var l=d.geocodes[0].location.split(",");DEST_LAT=parseFloat(l[1]);DEST_LNG=parseFloat(l[0]);DEST_NAME=d.geocodes[0].formatted_address;
+      $("rName").textContent=DEST_NAME;$("rCoord").textContent=DEST_LAT.toFixed(6)+", "+DEST_LNG.toFixed(6);
+      $("resultBox").style.display="block";$("startBtn").disabled=false;toast("✅ "+DEST_NAME);
+      showAmap(DEST_LAT,DEST_LNG);
+    }else{toast("未找到")}
+  }).catch(function(e){toast("搜索失败")})
+}
+function quickNav(name){$("addrInput").value=name;searchGo()}
+function startNav(){
+  if(!DEST_LAT){toast("请先搜索");return}
+  fetch(URL+"/destination",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({lat:DEST_LAT,lon:DEST_LNG,name:DEST_NAME})})
+  .then(function(){toast("已发送");$("startBtn").style.display="none";$("cancelBtn").style.display="block"})
+  .catch(function(e){toast("发送失败")})
+}
+function cancelNav(){fetch(URL+"/cancel").then(function(){toast("已取消");$("startBtn").style.display="block";$("cancelBtn").style.display="none";$("mapWrap").style.display="none"}).catch(function(){toast("取消失败, 请重试")})}
+function sendCmd(path,msg,cb){fetch(URL+path).then(function(r){return r.json()}).then(function(d){toast(msg);if(cb)cb(d)}).catch(function(e){toast("板子未连接")})}
+
+// ═══ 地图 ═══
+function showAmap(dLat,dLng){
+  var div=$("mapView"); if(!div){return}
+  $("mapWrap").style.display="block";
+  if(!amap){amap=new AMap.Map("mapView",{zoom:15,center:[117.254286,31.752581]})}
+  var dest=[dLng,dLat];
+  if(amapMarker)amapMarker.setMap(null);
+  amapMarker=new AMap.Marker({position:dest,map:amap});
+  if(amapRoute)amapRoute.setMap(null);
+  fetch("https://restapi.amap.com/v3/direction/walking?origin=117.254286,31.752581&destination="+dLng+","+dLat+"&key="+WEB_KEY)
+  .then(function(r){return r.json()}).then(function(j){
+    if(j.status=="1"){
+      var pts=[];
+      j.route.paths[0].steps.forEach(function(s){
+        (s.polyline||"").split(";").forEach(function(p){
+          var xy=p.split(",");if(xy.length==2){pts.push([parseFloat(xy[0]),parseFloat(xy[1])])}
+        })
+      });
+      amapRoute=new AMap.Polyline({path:pts,strokeColor:"#0088ff",strokeWeight:4,map:amap});
+      amap.setFitView();
+    }
+  }).catch(function(e){console.error("路线加载失败",e)});
+}
+
+// ═══ 常用 ═══
+var placesData=[{name:"公司",lat:31.7520,lon:117.2518,count:5,last:"2026-06-30"},{name:"天安门",lat:39.9042,lon:116.4074,count:3,last:"2026-06-29"},{name:"合肥南站",lat:31.7458,lon:117.2274,count:2,last:"2026-06-28"}];
+function loadPlaces(){
+  var h="";
+  for(var i=0;i<placesData.length;i++){
+    var p=placesData[i];
+    h+='<div class="place-item" onclick="DEST_LAT='+p.lat+';DEST_LNG='+p.lon+';DEST_NAME=\''+p.name+'\';$(\'rName\').textContent=\''+p.name+'\';$(\'resultBox\').style.display=\'block\';$(\'startBtn\').disabled=false;switchTab(\'nav\');toast(\'📍 '+p.name+'\')"><div><div class="pname">📍 '+p.name+'</div><div class="pmeta">'+p.count+'次 · '+p.last+'</div></div><button class="btn btn-sm" onclick="event.stopPropagation();renameP(\''+p.name+'\')">✏️</button></div>'
+  }
+  $("placesList").innerHTML=h||"暂无"
+}
+function renameP(old){var n=prompt("重命名:",old);if(n&&n!=old){for(var i=0;i<placesData.length;i++){if(placesData[i].name==old)placesData[i].name=n};loadPlaces();toast("✅ "+n)}}
+
+// ═══ 记录 ═══
+function loadHistory(){
+  $("statsGrid").innerHTML='<div><div class="val">12</div><div class="lbl">总次数</div></div><div><div class="val">108.1</div><div class="lbl">总里程 km</div></div><div><div class="val">425</div><div class="lbl">总时长 min</div></div>';
+  $("rideList").innerHTML='<div class="place-item"><div><div class="pname">🚴 06-30 08:15</div><div class="pmeta">8.3km · 合肥创新产业园</div></div></div><div class="place-item"><div><div class="pname">🚴 06-29 14:20</div><div class="pmeta">12.1km · 天安门</div></div></div><div class="place-item"><div><div class="pname">🚴 06-28 18:00</div><div class="pmeta">5.2km · 合肥滨湖湿地</div></div></div>'
+}
+
+// ═══ 分析 ═══
+function loadAnalysis(){
+  $("aKm").textContent="108.1";$("aHr").textContent="7.1";$("aSpd").textContent="15.1";$("aMax").textContent="32.5";
+  $("aTrend").textContent="📈 骑行趋势: ↗ 上升";$("aPeak").textContent="8:00";$("aLong").textContent="14.2 km";$("aFast").textContent="32.5 km/h";$("aWk").textContent="108.1";$("aDay").textContent="9.0";
+  var d={"0-10":0,"10-15":0,"15-20":0,"20-25":4,"25+":8},maxV=8,bars="";
+  var keys=["0-10","10-15","15-20","20-25","25+"];
+  for(var i=0;i<keys.length;i++){var e=keys[i];var pct=Math.round(d[e]/maxV*100);bars+='<div style="flex:1;background:linear-gradient(180deg,#007AFF,#5856D6);height:'+pct+'%;border-radius:4px 4px 0 0;opacity:'+(0.4+pct/100*0.6)+';position:relative"><span style="position:absolute;top:-14px;left:50%;transform:translateX(-50%);font-size:.55rem;font-weight:600;color:var(--blue)">'+d[e]+'</span></div>'}
+  $("speedBars").innerHTML=bars;
+  $("topDests").innerHTML='<div style="padding:4px 0">1. 创新产业园 <span style="color:var(--blue);font-weight:600">3次</span></div><div style="padding:4px 0">2. 滨湖湿地 <span style="color:var(--blue);font-weight:600">2次</span></div><div style="padding:4px 0">3. 翡翠湖 <span style="color:var(--blue);font-weight:600">2次</span></div>'
+}
+
+loadPlaces();loadHistory();
+</script>
+</body></html>

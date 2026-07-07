@@ -1,0 +1,132 @@
+================================================================================
+  摄像头预警模块 — V2.0 到 V3.0 迁移说明
+  日期: 2026-07-03
+================================================================================
+
+一、发生了什么
+──────────────────────────────────────────────────────────────────────────────
+今天的摄像头预警模块修复工作是在 V2.0 目录下完成的:
+  C:\Users\wangy\Desktop\HUD_Project_All\HUD_Project_V2.0_20260702\board\
+
+但你的最新稳定版是 V3.0:
+  C:\Users\wangy\Desktop\HUD_Project_All\HUD_Project_V3.0_20260703\
+
+V3.0 目录结构:
+  1_PC_Code/board/     ← PC端 Python 源码 (26个文件)
+  1_PC_Code/phone_app/ ← 手机App源码
+  1_PC_Code/apk/       ← APK安装包
+  2_BoardFiles/        ← 板子部署文件 (含 __pycache__ .pyc)
+  3_AI_NPU_Models/     ← AI模型 (yolov5s + whisper + rknn库)
+  4_Docs/              ← 文档
+
+
+二、V3.0 缺失的摄像头模块文件 (需要新增)
+──────────────────────────────────────────────────────────────────────────────
+V3.0 的 1_PC_Code/board/ 缺少以下3个摄像头模块源码文件:
+
+  ❌ camera_manager.py   — USB摄像头管理器 (V2.0 今天刚重写的V2.1版)
+  ❌ camera_config.py    — 摄像头可调参数
+  ❌ ai_monitor.py       — AI推理调度线程
+
+这3个文件在 V2.0 的 board/ 下是完整且经过板子实测验证的最新版本。
+
+操作: 直接将 V2.0 的这3个文件复制到 V3.0:
+  FROM: HUD_Project_V2.0_20260702\board\camera_manager.py
+  FROM: HUD_Project_V2.0_20260702\board\camera_config.py
+  FROM: HUD_Project_V2.0_20260702\board\ai_monitor.py
+  TO:   HUD_Project_V3.0_20260703\1_PC_Code\board\
+
+
+三、V3.0 需要修改的文件 (需要合并差异)
+──────────────────────────────────────────────────────────────────────────────
+V3.0 已有的文件 contains NO camera-related code. 需要合并 V2.0 的摄像头部分。
+
+3.1 http_server.py
+    需要添加的代码 (V2.0 版本中已验证):
+    - /camera/status  端点 → camera.get_status()
+    - /camera/scan    端点 → camera.scan()
+    - /camera/start   端点 → camera.open() + ai_monitor.start()
+    - /camera/stop    端点 → ai_monitor.stop() + camera.close() + reset_alert()
+    - /camera/frame   端点 → camera.get_latest_jpeg() (返回 image/jpeg)
+
+    ⚠ 注意: 先用 diff 工具对比 V2.0 和 V3.0 的 http_server.py,
+            V3.0 版可能有其他改动, 只合并 camera 相关部分。
+    V2.0 camera端点位置: http_server.py 约第195-234行
+
+3.2 main.py
+    需要添加的代码:
+    - 第42行附近: SKIP_BLE=True / SKIP_HUD=True 调试开关
+    - 第418-427行: BLE/HUD 条件初始化 (if SKIP_BLE: ble=None ...)
+    - 第505行: BLE start 条件化 (if ble: ble.start())
+    - 第523行: HUD start 条件化 (if not SKIP_HUD: hud.start())
+    - 第583行: BLE send_status 条件化 (if snap.is_navigating and ble:)
+    - 第588-608行 shutdown: camera.close() + ai_monitor.stop() 清理
+    - 第604行: hud.stop() 条件化 (if hud:)
+    - 第608行: ble.stop() 条件化 (if ble:)
+
+    ⚠ V3.0 的 main.py 可能有其他改动 (drm_display等), 需要 diff 合并。
+
+3.3 nav_state.py
+    V2.0 版本添加了4个 camera_* 字段。需要检查 V3.0 版本是否已有这些字段。
+    如没有, 添加:
+    - camera_active: bool = False
+    - camera_alert_level: int = 0
+    - camera_alert_msg: str = ""
+    - camera_vehicles: int = 0
+
+3.4 ai_alert.py (V3.0 有, V2.0 也有, 需要对比)
+    V2.0 版本重写过 (防抖/分级/语音去重/nav_state写入)
+    V3.0 版本位于: 1_PC_Code/board/ai_alert.py
+    同时也存在于: 3_AI_NPU_Models/ai_alert.py
+    需要确认哪个是实际使用的版本, 然后合并差异。
+
+3.5 ai_detect.py 和 camera_capture.py
+    这两个文件在两个版本中都有, V2.0 未做改动。
+    可以直接用 V3.0 的版本 (V3.0 是最新的)。
+
+
+四、V2.0 修复的核心问题 (已解决)
+──────────────────────────────────────────────────────────────────────────────
+根因: 板子 Buildroot 没装 ffmpeg!
+修复: camera_manager.py 重写为持久 v4l2-ctl 流式采集
+  - v4l2-ctl --stream-mmap --stream-to=/dev/stdout → Python pipe → MJPEG解析
+  - 采集性能: 0fps(失败) → 40fps+ (5秒228帧)
+  - 新增 get_latest_jpeg() 供 HTTP 接口使用
+
+其他修复:
+  - http_server.py: /camera/frame 改用 get_latest_jpeg()
+  - main.py: SKIP_BLE/SKIP_HUD 开关, ble.stop()空指针修复
+  - camera_config.py: 注释更新 (ffmpeg→v4l2-ctl)
+
+
+五、V3.0 多出来的文件 (V2.0没有)
+──────────────────────────────────────────────────────────────────────────────
+  drm_display.py — DRM直接渲染 (替代pygame HDMI), V3.0新特性
+
+V3.0 的 2_BoardFiles/ 目录下还有板子部署用的 __pycache__ 文件,
+这些应该和 1_PC_Code/board/ 源码保持同步。
+
+
+六、建议迁移步骤
+──────────────────────────────────────────────────────────────────────────────
+1. [简单] 复制 3 个新文件:
+     camera_manager.py, camera_config.py, ai_monitor.py
+     V2.0 → V3.0\1_PC_Code\board\
+
+2. [需要diff] 合并 http_server.py:
+     用 Beyond Compare / WinMerge / VSCode diff 对比 V2.0 和 V3.0 的版本
+     → 将 V2.0 中约 195-234 行的 /camera/* 端点代码合并到 V3.0
+
+3. [需要diff] 合并 main.py:
+     对比两个版本 → 合并 camera 清理代码 + SKIP 开关 + 空指针修复
+
+4. [检查] nav_state.py 是否有 camera_* 字段, 没有则添加
+
+5. [检查] ai_alert.py 对比 V2.0 和 V3.0 版本, 确认哪个是最终版
+
+6. [推送] 所有文件推送到板子 /opt/hud_navi/
+     注意: mount -o remount,rw /  (文件系统默认只读)
+
+7. [验证] 测试 /camera/start → /camera/status → /camera/frame → /camera/stop
+
+================================================================================

@@ -1,0 +1,78 @@
+================================================================
+  HUD V3.1 新增模块 — Vosk + Piper + 唤醒词 部署指南
+  日期: 2026-07-03
+================================================================
+
+一、Vosk 离线语音识别 (替代Whisper, 66MB, 纯CPU, 中文更准)
+──────────────────────────────────────────────────────────
+1. 安装Python包:
+   /opt/miniforge3/bin/pip install vosk==0.3.45
+
+2. 推ARM64动态库:
+   cp 2_BoardFiles/opt/hud_navi/libvosk.so /opt/miniforge3/lib/python3.11/site-packages/vosk/
+
+3. 模型已包含在项目中:
+   2_BoardFiles/data/vosk_model/vosk-model-small-cn-0.22/
+
+4. 验证:
+   /opt/miniforge3/bin/python3 -c "from vosk import Model; print('OK')"
+
+
+二、Piper TTS 离线语音合成 (替代Edge-TTS, 60MB, 纯离线真人声)
+──────────────────────────────────────────────────────────
+1. 创建目录并复制文件:
+   mkdir -p /opt/hud_navi/piper
+   cp 2_BoardFiles/opt/hud_navi/piper/* /opt/hud_navi/piper/
+
+2. 创建动态库软链接:
+   ln -sf /opt/hud_navi/piper/libespeak-ng.so.1.52.0.1 /opt/hud_navi/piper/libespeak-ng.so.1
+   ln -sf /opt/hud_navi/piper/libpiper_phonemize.so.1.2.0 /opt/hud_navi/piper/libpiper_phonemize.so.1
+
+3. 验证:
+   echo '你好' | LD_LIBRARY_PATH=/opt/hud_navi/piper /opt/hud_navi/piper/piper --model /opt/hud_navi/piper/zh_CN-huayan-medium.onnx --output_file /tmp/t.wav
+
+
+三、唤醒反馈音
+──────────────────────────────────────────────────────────
+1. 创建目录:
+   mkdir -p /opt/hud_navi/data/voice_prompts
+
+2. 生成"我在"反馈音:
+   echo '我在' | LD_LIBRARY_PATH=/opt/hud_navi/piper /opt/hud_navi/piper/piper --model /opt/hud_navi/piper/zh_CN-huayan-medium.onnx --output_file /opt/hud_navi/data/voice_prompts/start_speak.wav
+
+3. 验证:
+   aplay -D plughw:2,0 /opt/hud_navi/data/voice_prompts/start_speak.wav
+
+
+四、启动守护进程 (Shell guard + start-stop-daemon)
+──────────────────────────────────────────────────────────
+1. 确认 /etc/init.d/S99hudnavi 使用 start-stop-daemon:
+   start-stop-daemon -S -b -m -p /tmp/hud.pid -x /bin/sh -- /opt/hud_navi/guard.sh
+
+2. 验证:
+   cat /tmp/hud.pid  # 应显示PID
+   /etc/init.d/S99hudnavi status  # 应显示 running
+
+
+五、语音控制模块文件清单
+──────────────────────────────────────────────────────────
+板子上新增/修改的关键文件:
+  /opt/hud_navi/voice_command.py  — Vosk+唤醒词 (build_vc.py生成)
+  /opt/hud_navi/hud_vosk.py       — Vosk封装
+  /opt/hud_navi/hud_tts.py        — Piper TTS封装
+  /opt/hud_navi/guard.sh          — Shell守护进程
+  /opt/hud_navi/deploy.sh         — 一键部署脚本
+  /opt/hud_navi/piper/            — Piper二进制+模型 (~110MB)
+  /opt/hud_navi/data/vosk_model/  — Vosk模型 (66MB)
+  /opt/hud_navi/data/voice_prompts/ — 反馈音WAV
+  /etc/init.d/S99hudnavi          — 更新: WiFi+start-stop-daemon
+  /usr/lib/librknnrt.so           — 更新: v1.4.0→v2.3.2
+
+
+六、唤醒词使用
+──────────────────────────────────────────────────────────
+唤醒词: "小正小正" (同音字容错: 小镇小镇/小郑小郑/小真小真)
+流程: 说"小正小正" → 听到"我在" → 10秒内说命令
+命令: "我要去公司" / "我要去安徽建筑大学" / "取消导航" 等
+
+已内置合肥16个常用地点: 公司/火车站/南站/之心城/天鹅湖/包公园/大蜀山等

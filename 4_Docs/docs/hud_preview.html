@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HUD AR 导航 — 最终效果预览</title>
+<style>
+  body {
+    margin: 0; padding: 30px;
+    background: #1a1a2e;
+    display: flex; flex-direction: column;
+    align-items: center; gap: 24px;
+    font-family: 'PingFang SC','Microsoft YaHei',sans-serif;
+    color: #ccc;
+  }
+  h2 { color: #fff; margin: 0; font-size: 18px; }
+  .scene-label { font-size: 12px; color: #888; margin-bottom: 6px; }
+
+  /* 模拟光学镜头视角 — 圆形视场 */
+  .hud-wrap {
+    position: relative;
+    width: 640px; height: 400px;
+    border-radius: 50%;
+    overflow: hidden;
+    box-shadow: 0 0 0 2px #333, 0 0 60px rgba(0,100,255,0.15);
+    background: #000;
+  }
+
+  .hud {
+    width: 640px; height: 400px;
+    position: relative;
+    background: #1a2a1a;
+    /* 模拟地图底图 — 简单道路网格 */
+    background-image:
+      radial-gradient(circle at 50% 50%, #2a4a2a 0%, #1a2a1a 60%),
+      linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px),
+      linear-gradient(0deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+    background-size: 100% 100%, 40px 40px, 40px 40px;
+    font-family: 'PingFang SC','Microsoft YaHei',monospace;
+  }
+
+  /* 模拟建筑块 */
+  .building {
+    position: absolute;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 2px;
+  }
+
+  /* 路线 */
+  .route {
+    position: absolute;
+    border-bottom: 3px solid rgba(0,180,255,0.7);
+    transform-origin: left center;
+  }
+
+  /* 当前位置 — 屏幕中心蓝点 */
+  .pos-dot {
+    position: absolute; top: 50%; left: 50%;
+    width: 14px; height: 14px;
+    margin: -7px 0 0 -7px;
+    background: #00dcff;
+    border-radius: 50%;
+    box-shadow: 0 0 8px #00dcff;
+    z-index: 10;
+  }
+  .pos-arrow {
+    position: absolute; top: 50%; left: 50%;
+    width: 0; height: 0;
+    margin: -16px 0 0 -5px;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-bottom: 18px solid #00dcff;
+    transform: rotate(25deg);
+    transform-origin: center 16px;
+    z-index: 9;
+  }
+
+  /* 大方向箭头 (AR叠加) */
+  .ar-arrow {
+    position: absolute;
+    top: 100px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 72px; color: rgba(255,255,255,0.85);
+    text-shadow: 0 0 30px rgba(0,180,255,0.6);
+    z-index: 20;
+    pointer-events: none;
+  }
+  .ar-dist {
+    position: absolute;
+    top: 175px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 44px; font-weight: bold;
+    color: #fff;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+    z-index: 20;
+  }
+  .ar-street {
+    position: absolute;
+    top: 225px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 18px; font-weight: bold;
+    color: #ddd;
+    text-shadow: 0 2px 6px rgba(0,0,0,0.9);
+    z-index: 20;
+    white-space: nowrap;
+  }
+
+  /* 顶部状态条 */
+  .top-bar {
+    position: absolute; top: 0; left: 0; right: 0; height: 24px;
+    background: rgba(0,0,0,0.65);
+    display: flex; justify-content: space-between;
+    align-items: center; padding: 0 12px;
+    font-size: 12px; color: #aaa;
+    z-index: 25;
+  }
+  .top-bar .batt { color: #4f4; }
+  .top-bar .gps  { color: #4f4; }
+  .top-bar .mode { color: #888; }
+
+  /* 底部信息栏 */
+  .bot-bar {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 36px;
+    background: rgba(0,0,0,0.7);
+    display: flex; justify-content: space-around;
+    align-items: center; font-size: 13px; color: #bbb;
+    z-index: 25;
+  }
+  .bot-bar span b { color: #fff; }
+
+  /* 目的地红点 */
+  .dest-marker {
+    position: absolute;
+    width: 10px; height: 10px;
+    background: #ff3838;
+    border-radius: 50%;
+    box-shadow: 0 0 6px #ff3838;
+    z-index: 8;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { box-shadow: 0 0 4px #ff3838; }
+    50%     { box-shadow: 0 0 14px #ff3838, 0 0 20px rgba(255,56,56,0.4); }
+  }
+
+  /* 场景切换按钮 */
+  .btns { display: flex; gap: 10px; }
+  .btns button {
+    padding: 8px 20px; border-radius: 6px; border: 1px solid #555;
+    background: #222; color: #ccc; cursor: pointer; font-size: 13px;
+    transition: all 0.2s;
+  }
+  .btns button:hover { border-color: #58a6ff; color: #fff; }
+  .btns button.on { background: #1a3a5c; border-color: #58a6ff; color: #fff; }
+
+  .note {
+    font-size: 11px; color: #666; max-width: 640px; text-align: center;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+<h2>🪖 HUD AR 导航 — 640×400 最终效果预览</h2>
+
+<div class="btns">
+  <button class="on" onclick="showScene(0)">➡️ 右转 200m</button>
+  <button onclick="showScene(1)">⬆️ 直行 850m</button>
+  <button onclick="showScene(2)">🏁 到达目的地</button>
+  <button onclick="showScene(3)">⚠️ GPS信号弱</button>
+</div>
+
+<div class="scene-label" id="scene-label">右转进入天目山路 — 前方 200m</div>
+
+<div class="hud-wrap">
+  <div class="hud" id="hud">
+
+    <!-- 建筑模拟 -->
+    <div class="building" style="left:80px;top:120px;width:55px;height:35px;"></div>
+    <div class="building" style="left:150px;top:90px;width:40px;height:50px;"></div>
+    <div class="building" style="left:500px;top:140px;width:60px;height:30px;"></div>
+    <div class="building" style="left:420px;top:250px;width:45px;height:55px;"></div>
+    <div class="building" style="left:300px;top:60px;width:35px;height:40px;"></div>
+
+    <!-- 路线 (蓝色折线) → 右前方转弯 -->
+    <svg style="position:absolute;top:0;left:0;width:640px;height:400px;z-index:5;pointer-events:none;">
+      <polyline points="320,200 320,160 340,130 390,100 450,90 500,85"
+                fill="none" stroke="rgba(0,180,255,0.7)" stroke-width="4"
+                stroke-linecap="round" stroke-linejoin="round"/>
+      <!-- 剩余路线虚线 -->
+      <polyline points="500,85 530,80 550,75"
+                fill="none" stroke="rgba(0,180,255,0.35)" stroke-width="3"
+                stroke-dasharray="6 4" stroke-linecap="round"/>
+    </svg>
+
+    <!-- 目的地标记 -->
+    <div class="dest-marker" style="left:547px;top:72px;"></div>
+
+    <!-- 当前位置 -->
+    <div class="pos-dot"></div>
+    <div class="pos-arrow"></div>
+
+    <!-- AR 叠加层 -->
+    <div class="ar-arrow" id="ar-arrow">→</div>
+    <div class="ar-dist"  id="ar-dist">200 m</div>
+    <div class="ar-street" id="ar-street">右转进入天目山路</div>
+
+    <!-- 顶部状态条 -->
+    <div class="top-bar">
+      <span class="batt">⚡ 87%</span>
+      <span class="mode">🌐 在线</span>
+      <span class="gps">📶 GPS:12</span>
+    </div>
+
+    <!-- 底部信息栏 -->
+    <div class="bot-bar">
+      <span>🚲 <b>18.5</b> km/h</span>
+      <span>剩 <b>3.2</b> km</span>
+      <span>约 <b>12</b> min</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="note">
+  ▲ 模拟视角：通过自由曲面光学镜头观察 0.23" Micro OLED 面板<br>
+  实际观感 ≈ 3米外 50寸大屏, 24° 视场角 — 文字清晰可读
+</div>
+
+<script>
+const scenes = [
+  { // 0: 右转
+    arrow: '→', dist: '200 m', street: '右转进入天目山路',
+    batt: '87%', gps: '12', mode: '在线',
+    spd: '18.5', rm: '3.2', eta: '12',
+    route: '320,200 320,160 340,130 390,100 450,90 500,85',
+    routeDashed: '500,85 530,80 550,75',
+    destX: 547, destY: 72,
+    battColor: '#4f4', gpsColor: '#4f4',
+    label: '右转进入天目山路 — 前方 200m'
+  },
+  { // 1: 直行
+    arrow: '↑', dist: '850 m', street: '沿天目山路直行',
+    batt: '82%', gps: '10', mode: '在线',
+    spd: '22.0', rm: '1.8', eta: '5',
+    route: '320,200 320,140 315,80 310,50',
+    routeDashed: '310,50 308,30',
+    destX: 306, destY: 28,
+    battColor: '#4f4', gpsColor: '#4f4',
+    label: '沿天目山路直行 — 前方 850m'
+  },
+  { // 2: 到达
+    arrow: '✓', dist: '', street: '',
+    batt: '78%', gps: '11', mode: '在线',
+    spd: '0', rm: '0', eta: '0',
+    route: '',
+    routeDashed: '',
+    destX: 317, destY: 197,
+    battColor: '#4f4', gpsColor: '#4f4',
+    label: '🏁 已到达目的地 — 语音播报触发'
+  },
+  { // 3: GPS弱
+    arrow: '→', dist: '?', street: 'GPS信号弱...',
+    batt: '14%', gps: '2', mode: '在线',
+    spd: '--', rm: '--', eta: '--',
+    route: '',
+    routeDashed: '',
+    destX: 547, destY: 72,
+    battColor: '#f33', gpsColor: '#fa0',
+    label: '⚠️ 低电量 + GPS信号弱警告'
+  }
+];
+
+function showScene(n) {
+  const s = scenes[n];
+
+  // Update buttons
+  document.querySelectorAll('.btns button').forEach((b,i) => b.className = i===n ? 'on' : '');
+
+  // Arrows
+  document.getElementById('ar-arrow').textContent = s.arrow;
+  document.getElementById('ar-dist').textContent = s.dist;
+  document.getElementById('ar-street').textContent = s.street;
+
+  // Top bar
+  const topBar = document.querySelector('.top-bar');
+  topBar.innerHTML = `
+    <span style="color:${s.battColor}">⚡ ${s.batt}</span>
+    <span style="color:#888">🌐 ${s.mode}</span>
+    <span style="color:${s.gpsColor}">📶 GPS:${s.gps}</span>
+  `;
+
+  // Bottom bar
+  document.querySelector('.bot-bar').innerHTML = `
+    <span>🚲 <b>${s.spd}</b> km/h</span>
+    <span>剩 <b>${s.rm}</b> km</span>
+    <span>约 <b>${s.eta}</b> min</span>
+  `;
+
+  // Route SVG
+  const svg = document.querySelector('.hud svg');
+  let svgContent = '';
+  if (s.route) {
+    svgContent += `<polyline points="${s.route}" fill="none" stroke="rgba(0,180,255,0.7)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>`;
+  }
+  if (s.routeDashed) {
+    svgContent += `<polyline points="${s.routeDashed}" fill="none" stroke="rgba(0,180,255,0.35)" stroke-width="3" stroke-dasharray="6 4" stroke-linecap="round"/>`;
+  }
+  svg.innerHTML = svgContent;
+
+  // Destination marker
+  const dest = document.querySelector('.dest-marker');
+  dest.style.left = s.destX + 'px';
+  dest.style.top = s.destY + 'px';
+
+  // Scene label
+  document.getElementById('scene-label').textContent = s.label;
+
+  // Scene 2 special: arrived overlay
+  const hud = document.getElementById('hud');
+  // Remove existing arrived overlay
+  const old = document.getElementById('arrived-overlay');
+  if (old) old.remove();
+
+  if (n === 2) {
+    const overlay = document.createElement('div');
+    overlay.id = 'arrived-overlay';
+    overlay.style.cssText = `
+      position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+      font-size:36px; font-weight:bold; color:#3fb950;
+      text-shadow: 0 0 20px rgba(63,185,80,0.5);
+      z-index:30; pointer-events:none;
+    `;
+    overlay.textContent = '已到达';
+    hud.appendChild(overlay);
+  }
+
+  // Scene 3: error message
+  const oldErr = document.getElementById('error-msg');
+  if (oldErr) oldErr.remove();
+
+  if (n === 3) {
+    const err = document.createElement('div');
+    err.id = 'error-msg';
+    err.style.cssText = `
+      position:absolute; top:30px; left:50%; transform:translateX(-50%);
+      font-size:15px; font-weight:bold; color:#f85149;
+      background:rgba(0,0,0,0.8); padding:4px 14px; border-radius:4px;
+      z-index:30; pointer-events:none; white-space:nowrap;
+    `;
+    err.textContent = '⚠ GPS 信号弱';
+    hud.appendChild(err);
+  }
+}
+</script>
+</body>
+</html>

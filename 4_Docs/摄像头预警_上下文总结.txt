@@ -1,0 +1,125 @@
+================================================================================
+  摄像头预警模块 — 上下文总结 (换新对话用)
+  日期: 2026-07-03 (V2.1 更新)
+  项目路径: C:\Users\wangy\Desktop\HUD_Project_All\HUD_Project_V2.0_20260702\
+================================================================================
+
+一、项目背景
+──────────────────────────────────────────────────────────────────────────────
+HUD AR 骑行导航系统 V2.1, 板子 QSM368ZP-WF (RK3568, 2GB RAM, Linux 4.19)
+现有模块: GPS / BLE / HTTP / HUD / 语音唤醒("小正") / 路径规划
+
+V2.0 新增: 摄像头预警模块 — USB 摄像头朝后拍摄, YOLOv5 NPU 检测后方车辆,
+分级预警 → HUD显示 + 语音播报 + HTTP状态上报
+
+
+二、摄像头硬件
+──────────────────────────────────────────────────────────────────────────────
+型号: USB UVC MJPEG 640x480 90° 0.01Lux
+芯片: 0c45:64ab "XHH-260202-H" Integrated Camera
+板子USB口:
+  - USB 2.0 上/下层口 → OHCI (12Mbps USB 1.1) → 流传输卡死 ❌
+  - USB 3.0 蓝色口 → 不兼容 USB 1.1 设备 ❌
+  - GPS口 (Bus 1, XHCI 480Mbps) → 正常工作 ✅
+设备节点: /dev/video23 (仅在高速口)
+抓帧方式: v4l2-ctl -d /dev/video23 --stream-mmap --stream-to=/dev/stdout
+  ⚠ 板子没有 ffmpeg! 只能用 v4l2-ctl (Buildroot 预装)
+
+
+三、V2.1 核心修复 (2026-07-03)
+──────────────────────────────────────────────────────────────────────────────
+根因: 板子 Buildroot 未预装 ffmpeg, camera_manager 的 Popen(["ffmpeg",...])
+      每次都是 "command not found", 之前误以为是 daemon 线程限制或 pipe 问题.
+
+修复文件:
+  camera_manager.py  [重写] 持久v4l2-ctl流式采集, 不再依赖ffmpeg
+    - v4l2-ctl --stream-mmap --stream-to=/dev/stdout → Python pipe → MJPEG解析
+    - 采集性能: 0fps(失败) → 40fps+ (5秒228帧)
+    - 新增 get_latest_jpeg() 供HTTP接口使用 (不追踪已读序号)
+    - 子进程崩溃自动重启, 512KB缓冲区保护
+  camera_config.py   [改] 注释更新: ffmpeg → v4l2-ctl
+  http_server.py     [改] /camera/frame 改用 get_latest_jpeg()
+  main.py            [改] 新增 SKIP_BLE=True / SKIP_HUD=True 调试开关
+    - 修复 ble.stop() / hud.stop() 空指针崩溃
+    - BLE/HDMI 跳过时不影响 HTTP/GPS/摄像头/导航
+
+端到端测试结果 (2026-07-03, 全部通过):
+  ✅ /camera/start  → camera_started, AI推理线程启动
+  ✅ /camera/status → frame_seq=228(5秒), error_count=0, queue=3/3
+  ✅ /camera/frame  → Content-Type: image/jpeg, 32KB, 有效JPEG (ffd8ffe0)
+  ✅ /camera/stop   → camera_stopped, 摄像头+AI线程正确清理
+  ✅ AI推理         → 141ms/帧, 防抖+分级+nav_state写入全部正常
+  ✅ main.py启动    → HTTP/GPS/导航/摄像头/Edge-TTS正常, 干净退出无崩溃
+
+
+四、已完成的文件 (V2.1 更新后)
+──────────────────────────────────────────────────────────────────────────────
+camera_config.py      [配置] 所有可调参数集中管理, DEVICE=/dev/video23
+camera_manager.py     [核心] 持久v4l2-ctl流式采集 + deque(3) + MJPEG解析
+ai_monitor.py         [调度] AI调度线程, 取最新帧→NPU推理→回调
+ai_alert.py           [预警] 防抖(2帧)→分级(4级)→nav_state→语音去重(10s)
+ai_detect.py          [推理] YOLOv5 NPU推理+多帧速度计算
+camera_capture.py     [保留] 底层v4l2抓帧工具(已不再使用)
+nav_state.py          [改]   加4个camera_*字段
+http_server.py        [改]   /camera/start|stop|status|scan|frame 端点
+main.py               [改]   SKIP_BLE/SKIP_HUD开关 + shutdown清理
+
+
+五、框架架构 (未变)
+──────────────────────────────────────────────────────────────────────────────
+HTTP API (/camera/*)
+  → ai_alert (预警业务: 防抖→分级→nav_state→HUD/语音)
+    → ai_monitor (AI调度: 取帧→推理→输出Detection)
+      → camera_manager (摄像头: v4l2-ctl流式进程 + deque<3>)
+        → ai_detect (YOLOv5 NPU + 多帧速度计算)
+
+数据流:
+  USB摄像头 → v4l2-ctl MJPEG流 → pipe → Python解析JPEG → deque(3)
+  → ai_monitor取最新帧 → detect_vehicles() → assess_danger()
+  → handle_detection() → nav_state → HUD/HTTP/语音
+
+
+六、API接口
+──────────────────────────────────────────────────────────────────────────────
+GET /camera/scan     → 扫描设备列表
+GET /camera/status   → 运行状态(帧率/错误计数/队列/方法)
+GET /camera/start    → 打开摄像头+启动AI检测 (幂等)
+GET /camera/stop     → 停止AI+关闭摄像头 (幂等)
+GET /camera/frame    → 返回最新JPEG图片 (image/jpeg)
+GET /camera/config   → 当前配置 (TODO)
+
+
+七、板子运行状态 (2026-07-03)
+──────────────────────────────────────────────────────────────────────────────
+WiFi: 10.203.69.161 (小米14, 密码88888888)
+Python: /opt/miniforge3/bin/python (Python 3.11.15)
+启动命令: SDL_VIDEODRIVER=dummy start-stop-daemon -S -b -m -p /tmp/hud.pid
+          -x /opt/miniforge3/bin/python -- /opt/hud_navi/main.py
+停止命令: pkill -f main.py; /etc/init.d/S99hudnavi stop (如果init可用)
+ADB: USB 直连可用
+HDMI: 不可用 (main.py已设SKIP_HUD=True跳过)
+GPS: 室内可用! (已成功定位 31.749N, 117.251E)
+摄像头: /dev/video23, 必须插GPS口(XHCI 480Mbps)
+BLE: main.py已设SKIP_BLE=True跳过 (DBus/GATT问题)
+
+
+八、关键设计参数
+──────────────────────────────────────────────────────────────────────────────
+1. 帧缓存: 内存deque(maxlen=3), 不落盘, 溢出丢旧帧
+2. 采集方式: v4l2-ctl持久进程 → stdout pipe → SOI/EOI切帧
+3. 线程停止: _stop_event + terminate/kill pipe关闭 + join(3s)
+4. 预警防抖: 连续2帧同向变化才更新nav_state
+5. 语音去重: 同等级10s内不重复播
+6. Edge-TTS单例: speak_helper复用, 启动时预缓存14条语音
+7. /camera/frame: 使用get_latest_jpeg()而非get_latest_frame()
+   (后者会被AI线程消耗掉_last_seq_read导致HTTP返回空)
+
+
+九、剩余待办
+──────────────────────────────────────────────────────────────────────────────
+□ YOLOv5 NPU模型部署测试 (/data/yolo/)
+□ 手机App摄像头预警UI对接
+□ 室外骑行实测 (连接USB GPS天线 + 摄像头)
+□ BLE/HDMI修复后改回 SKIP_BLE=False, SKIP_HUD=False
+□ HDMI显示修复 (DRM设备树DSI问题, 非摄像头相关)
+================================================================================

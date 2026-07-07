@@ -1,0 +1,59 @@
+================================================================
+  HUD 显示模块 — 调试记录
+  日期: 2026-07-03
+  状态: ✅ 已验证可用
+================================================================
+
+一、问题
+──────────────────────────────────────────────────────────
+刷固件后 HUD 黑屏，pygame 报 EGL_BAD_ACCESS 错误。
+系统 SDL2(2.0.7)有wayland没KMSDRM，pygame自带SDL2(2.28.4)有KMSDRM没Mali EGL。
+
+二、解决方案
+──────────────────────────────────────────────────────────
+用预编译的 libsdl2_dll.so (SDL 2.32.0, 含KMSDRM+Mali EGL)替换：
+
+1. 替换系统SDL2:
+   mount -o remount,rw /
+   cp /usr/lib/libSDL2.so /usr/lib/libSDL2.so.bak
+   adb push libsdl2_dll.so /usr/lib/libSDL2.so
+
+2. 替换miniforge pygame自带的SDL2:
+   cd /opt/miniforge3/lib/python3.11/site-packages/pygame.libs/
+   mv libSDL2-2-6e5c51a6.0.so.0.2800.4 libSDL2-2-6e5c51a6.0.so.0.2800.4.bak
+   cp /usr/lib/libSDL2.so libSDL2-2-6e5c51a6.0.so.0.2800.4
+
+3. 安装pygame:
+   /opt/miniforge3/bin/pip install pygame  (或用micromamba install -p /opt/miniforge3 pygame -y)
+
+4. 关键修改:
+   - hud_display_c.py: SDL_VIDEODRIVER 改为 "KMSDRM" (不是wayland)
+   - config.py: SCREEN_WIDTH=1280, SCREEN_HEIGHT=720 (匹配HDMI EDID)
+   - main.py: HUD不在线程跑, 主循环直接调用 (KMSDRM不支持多线程)
+   - guard.sh: 启动前加 killall weston
+
+5. 测试命令:
+   killall weston; sleep 1
+   python3 -c "
+   import pygame,os;os.environ['SDL_VIDEODRIVER']='KMSDRM'
+   pygame.init();s=pygame.display.set_mode((1280,720))
+   s.fill((255,0,0));pygame.display.flip()
+   "
+
+三、关键发现
+──────────────────────────────────────────────────────────
+- KMSDRM 输出到 HDMI-A-1 (card0), 不是LVDS
+- HDMI EDID 支持 1280x720, 不支持 640x400
+- Weston 必须杀掉, 否则 GPU EGL 冲突
+- KMSDRM 不支持多线程, HUD 必须在主线程渲染
+- CRTC 错误是退出时的正常警告, 不影响显示
+- 重启后首次测试成功率最高 (GPU干净状态)
+
+四、文件变更清单
+──────────────────────────────────────────────────────────
+/usr/lib/libSDL2.so           — 替换为 libsdl2_dll.so
+/opt/hud_navi/config.py       — SCREEN_WIDTH=1280 SCREEN_HEIGHT=720
+/opt/hud_navi/hud_display_c.py — KMSDRM驱动
+/opt/hud_navi/main.py         — 主线程HUD渲染
+/opt/hud_navi/guard.sh        — 启动前kill weston
+pygame.libs/libSDL2-*.so      — 替换为自定义SDL2

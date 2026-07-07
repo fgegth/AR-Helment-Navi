@@ -1,0 +1,10 @@
+13:06:25 [MainThread] INFO - ============================================================
+13:06:25 [MainThread] INFO -   HUD 骑行导航系统 v0.1
+13:06:25 [MainThread] INFO - ============================================================
+13:06:25 [MainThread] INFO - 正在初始化各模块...
+13:06:25 [MainThread] INFO - 初始化地图服务...
+13:06:35 [MainThread] INFO -   在线模式(高德API): 不可用
+13:06:35 [MainThread] WARNING - osmnx/networkx 未安装，离线模式不可用
+13:06:35 [MainThread] INFO -   离线模式(OSM):    不可用
+13:06:35 [MainThread] WARNING - 无可用地图服务！SPP/HUD照常运行
+13:06:35 [MainThread] INFO - GPS串口已打开: /dev/ttyS8 @ 9600

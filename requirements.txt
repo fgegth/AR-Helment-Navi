@@ -1,0 +1,32 @@
+# HUD V3.0 骑行导航 — Python 依赖 (RK3568 ARM64, Linux 4.19)
+# 生成日期: 2026-07-05
+# 安装: pip install -r requirements.txt
+
+# === 核心 (必须安装) ===
+pyserial>=3.5          # GPS 串口读取 (ATGM336H-5N)
+requests>=2.28         # 高德地图 API HTTP 请求
+pygame>=2.5            # HUD 渲染 (SDL2 软件渲染模式)
+
+# === 语音识别 (推荐 Vosk) ===
+vosk>=0.3.45           # 离线语音识别 (纯CPU, 50MB模型, ~100ms延迟)
+# Whisper/whisper-cpp 已废弃, 改用 Vosk
+
+# === 语音合成 (按需选装, 有降级链) ===
+# Piper TTS — 离线ARM64原生中文真人声 (推荐, 需单独部署二进制+模型)
+# Edge-TTS — 免费在线, 国内可用, 无需翻墙
+edge-tts>=6.1          # Edge-TTS 在线语音合成
+gtts>=2.5              # gTTS 在线语音合成 (需翻墙, 备用)
+
+# === 可选: 离线地图 ===
+osmnx>=1.5             # OSM 地图加载 (需 networkx)
+networkx>=3.0          # A* 路径规划
+
+# === 可选: BLE 蓝牙 ===
+dbus-next>=0.2         # BlueZ D-Bus BLE GATT 服务
+
+# === 可选: IMU 传感器 ===
+smbus2>=0.4            # I2C 读取 MPU6050/ICM20948
+
+# === 可选: NPU AI 检测 ===
+# rknn-toolkit-lite2   # RK3568 NPU 推理 (需从瑞芯微获取, 不通过pip)
+# opencv-python        # 图像预处理 (AI检测用)

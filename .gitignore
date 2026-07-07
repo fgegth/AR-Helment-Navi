@@ -1,0 +1,12 @@
+﻿*.rknn
+*.onnx
+*.pt
+*.whl
+*.so
+__pycache__/
+node_modules/
+*.log
+*.jpg
+*.jpeg
+*.wav
+/tmp/

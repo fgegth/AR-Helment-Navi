@@ -1,0 +1,234 @@
+================================================================================
+  摄像头安全预警 — 完整系统流程
+  日期: 2026-07-03
+  版本: V3.0 (已部署验证)
+================================================================================
+
+一、系统架构总览
+──────────────────────────────────────────────────────────────────────────────
+
+  USB摄像头 (朝后)
+      │
+      ▼
+  camera_manager.py     ← v4l2-ctl 流式采集, MJPEG解析, deque(3)帧队列
+      │
+      ▼
+  ai_monitor.py         ← AI调度线程, 取最新帧 → 写磁盘 → 调NPU推理
+      │
+      ▼
+  ai_detect.py          ← YOLOv5s NPU推理, 55ms/帧, 检测后方车辆
+      │
+      ▼
+  ai_alert.py           ← 预警业务: 防抖→分级→写nav_state→语音播报
+      │
+      ├──→ nav_state.py      ← camera_active/alert_level/alert_msg/vehicles
+      │       │
+      │       ├──→ http_server.py  ← /status 上报给手机App
+      │       └──→ hud_display_c.py ← HUD屏幕显示 (SKIP_HUD=True暂跳过)
+      │
+      └──→ speak_helper.py  ← 语音播报 (10s同等级去重)
+
+
+二、数据流详解
+──────────────────────────────────────────────────────────────────────────────
+
+Step 1: 摄像头采集
+  ┌─────────────────────────────────────────────────────────┐
+  │ camera_manager.py                                       │
+  │                                                         │
+  │ [v4l2-ctl 持久进程]                                     │
+  │   v4l2-ctl -d /dev/video23 \                           │
+  │     --stream-mmap --stream-to=/dev/stdout                │
+  │        │                                                │
+  │        ▼ stdout pipe (MJPEG裸流)                        │
+  │   Python _capture_loop() 线程:                          │
+  │     1. select() 监听 pipe (0.1s超时)                    │
+  │     2. read(65536) → 拼接到缓冲区                       │
+  │     3. 按 SOI(ffd8)/EOI(ffd9) 切帧                     │
+  │     4. 入队 deque(maxlen=3)  (溢出丢旧帧)               │
+  │     5. 子进程崩溃 → 自动重启 (最多3次)                  │
+  │                                                         │
+  │ 采集性能: 56fps | 错误率: 0 | 缓冲区保护: 512KB        │
+  └─────────────────────────────────────────────────────────┘
+
+Step 2: AI推理调度
+  ┌─────────────────────────────────────────────────────────┐
+  │ ai_monitor.py                                           │
+  │                                                         │
+  │ _infer_loop() 线程 (daemon):                            │
+  │   loop:                                                 │
+  │     1. camera.get_latest_frame() → 取最新未处理帧       │
+  │        - 跳过 seq <= _last_seq_read 的旧帧              │
+  │        - 无帧时 sleep(0.05s)                            │
+  │     2. 写磁盘: /tmp/ai_infer_frame.jpg                  │
+  │     3. ai_detect.detect_vehicles(path) → NPU推理        │
+  │     4. ai_detect.assess_danger(detections) → 分级       │
+  │     5. callback(result) → 调 ai_alert.handle_detection  │
+  │                                                         │
+  │ 推理耗时: ~55ms/帧 (不含采集)                           │
+  └─────────────────────────────────────────────────────────┘
+
+Step 3: NPU推理 (YOLOv5s)
+  ┌─────────────────────────────────────────────────────────┐
+  │ ai_detect.py                                            │
+  │                                                         │
+  │ detect_vehicles(image_path):                            │
+  │   subprocess.run([                                      │
+  │     /data/yolo/rknn_yolov5_demo,  ← NPU推理程序         │
+  │     /data/yolo/model/yolov5s-640-640.rknn,  ← 模型     │
+  │     image_path                       ← 输入图片         │
+  │   ], cwd=/data/yolo, LD_LIBRARY_PATH=/data/yolo/lib)    │
+  │   → 解析stdout: cls_id conf x1 y1 x2 y2                │
+  │   → 过滤: cls_id in (car,bus,truck,motorcycle)         │
+  │        + confidence > 0.5                               │
+  │   → Detection对象列表                                   │
+  │                                                         │
+  │ 检测目标: 汽车car/公交车bus/卡车truck/摩托车motorcycle  │
+  │ 模型: YOLOv5s (COCO预训练), INT8量化                    │
+  │ 推理时间: 55ms/帧 | SDK: rknn 2.3.2 | NPU驱动: 0.8.2   │
+  └─────────────────────────────────────────────────────────┘
+
+Step 4: 危险评估
+  ┌─────────────────────────────────────────────────────────┐
+  │ ai_detect.py :: assess_danger(detections)               │
+  │                                                         │
+  │ 4级预警体系:                                            │
+  │                                                         │
+  │   ALERT_NONE    (0)  无车辆 或 无威胁                   │
+  │   ALERT_WATCH   (1)  有车, 观察中                       │
+  │   ALERT_WARNING (2)  车辆接近中 → 触发语音              │
+  │   ALERT_DANGER  (3)  快速接近! → 触发语音 + 覆盖HUD     │
+  │                                                         │
+  │ 分级算法:                                               │
+  │   1. 多帧面积变化 → 接近速度 speed_index                 │
+  │      - 面积增长率 > 0.03  → DANGER   (快速接近)        │
+  │      - 面积增长率 > 0.01  → WARNING  (缓慢接近)         │
+  │      - 检测框面积 > 0.3   → WARNING  (非常近)          │
+  │   2. 最近5帧历史 (deque(5)) 用于速度计算                │
+  └─────────────────────────────────────────────────────────┘
+
+Step 5: 预警过滤 (防抖 + 语音去重)
+  ┌─────────────────────────────────────────────────────────┐
+  │ ai_alert.py :: handle_detection(result)                 │
+  │                                                         │
+  │ 防抖机制:                                               │
+  │   - 连续 2 帧 (ALERT_DEBOUNCE_FRAMES=2)                 │
+  │   - 同等级才计数, 等级变化重置计数                      │
+  │   - 未达阈值 → 丢弃, 不更新状态                         │
+  │                                                         │
+  │ 语音去重:                                               │
+  │   - 同等级 10s 内不重复播 (AI_VOICE_COOLDOWN=10)       │
+  │   - 不同等级立即播                                      │
+  │   - 异步播放 (独立线程, 不阻塞推理)                     │
+  └─────────────────────────────────────────────────────────┘
+
+Step 6: 状态同步
+  ┌─────────────────────────────────────────────────────────┐
+  │ nav_state.py (threading.RLock 保护)                     │
+  │                                                         │
+  │ camera_active: bool       ← 摄像头是否运行中            │
+  │ camera_alert_level: int   ← 预警等级 0-3                │
+  │ camera_alert_msg: str     ← 预警文本 "后方2辆车接近中"  │
+  │ camera_vehicles: int      ← 检测到的车辆数              │
+  │                                                         │
+  │ 读取方:                                                 │
+  │   - http_server.py  /status → 手机App轮询               │
+  │   - hud_display_c.py        → HUD屏幕渲染               │
+  └─────────────────────────────────────────────────────────┘
+
+
+三、HTTP API 完整清单
+──────────────────────────────────────────────────────────────
+
+  端点                   方法   说明
+  ─────────────────────  ────  ───────────────────────────
+  /camera/scan           GET    扫描摄像头设备列表
+  /camera/start          GET    打开摄像头 + 启动AI检测
+  /camera/stop           GET    停止AI检测 + 关闭摄像头
+  /camera/status         GET    采集状态 (帧率/错误/队列)
+  /camera/frame          GET    返回最新JPEG (image/jpeg)
+  /ai/status             GET    当前预警状态
+  /ai/start              GET    单独启动AI检测 (无需摄像头)
+  /status                GET    完整导航状态 (含camera_*字段)
+
+
+四、配置文件 (camera_config.py)
+──────────────────────────────────────────────────────────────
+
+  参数                    值              说明
+  ──────────────────────  ──────────────  ──────────────────
+  DEVICE                  /dev/video23    USB摄像头设备
+  WIDTH × HEIGHT          640 × 480      采集分辨率
+  FPS                     15             目标帧率
+  FRAME_QUEUE_SIZE        3              内存环形队列长度
+  ALERT_DEBOUNCE_FRAMES   2              预警防抖帧数
+  SPEED_WARN_THRESHOLD    0.01           接近速度警告阈值
+  SPEED_DANGER_THRESHOLD  0.03           接近速度危险阈值
+  NPU_INFER_TIMEOUT       5.0            单帧推理超时(秒)
+  AI_VOICE_COOLDOWN       10.0           语音播报冷却(秒)
+  FFMPEG_RETRY_MAX        3              v4l2-ctl重启上限
+
+
+五、启动/停止流程
+──────────────────────────────────────────────────────────────
+
+  启动 (HTTP /camera/start):
+    camera_manager.open()
+      → 检查 /dev/video23 存在
+      → 检查 v4l2-ctl 可用
+      → 设置摄像头格式: MJPEG 640x480
+      → 启动 v4l2-ctl 流式进程 (stdout pipe)
+      → 启动 _capture_loop 采集线程
+      → nav_state.camera_active = True
+    ai_monitor.start(callback=handle_detection)
+      → 启动 _infer_loop 推理线程
+      → 返回 camera_started
+
+  停止 (HTTP /camera/stop):
+    ai_monitor.stop()
+      → 设 _stop_event → 推理线程退出
+    camera_manager.close()
+      → terminate v4l2-ctl 子进程
+      → 关闭 stdout pipe
+      → 等待采集线程退出 (join 3s)
+      → 清空帧队列 + 删除磁盘缓存
+    reset_alert()
+      → 重置预警状态 → nav_state 清零
+      → nav_state.camera_active = False
+
+  系统关机 (main.py shutdown):
+    try: camera.close()
+    try: ai_monitor.stop()
+    if hud: hud.stop()
+    voice.stop()
+    nav_engine.stop()
+    if ble: ble.stop()
+    gps.stop()
+
+
+六、开机自启动 (S99hudnavi)
+──────────────────────────────────────────────────────────────
+
+  /etc/init.d/S99hudnavi start:
+    1. wifi_setup.py → 读 wifi_saved.json → 自动连WiFi
+    2. 等WiFi获取IP (最多30秒)
+    3. 预缓存语音提示 (speak_helper, 后台)
+    4. start-stop-daemon → main.py (崩溃自动重启)
+
+
+七、已完成的端到端验证 (2026-07-03)
+──────────────────────────────────────────────────────────────
+
+  [OK] /camera/scan      → 扫描到 /dev/video0 ~ video23
+  [OK] /camera/start     → v4l2-ctl启动 + AI线程启动
+  [OK] /camera/status    → frame_seq=283(5s), error_count=0
+  [OK] /camera/frame     → image/jpeg, 有效JPEG (ffd8)
+  [OK] /camera/stop      → camera_stopped, 资源正确释放
+  [OK] NPU推理           → 55ms/帧, 10帧平均
+  [OK] /ai/status        → 预警状态正确返回
+  [OK] /status           → camera_* 字段实时上报
+  [OK] 防抖+分级+语音去重 → 逻辑完整, 参数可调
+  [OK] main.py shutdown  → 干净退出, 无线程残留
+  [OK] WiFi自启动        → S99hudnavi一键启动全链路
+
+================================================================================

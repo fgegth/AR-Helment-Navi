@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AR-HUD 最终效果预览 — 单线导航</title>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --text: #e8eaed;
+    --dim: #9aa0a6;
+    --route: rgba(255,255,255,0.85);
+    --arrow: rgba(255,255,255,0.95);
+    --dot: #00dcff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex; flex-direction: column;
+    align-items: center; gap: 20px;
+    font-family: 'PingFang SC','Microsoft YaHei',sans-serif;
+    color: #ccc; padding: 30px;
+  }
+  h2 { color: #fff; font-size: 18px; }
+  .desc { font-size: 12px; color: #888; text-align: center; max-width: 640px; line-height: 1.6; }
+
+  /* 模拟光学镜头 — 圆形视场 */
+  .hud-wrap {
+    position: relative;
+    width: 640px; height: 400px;
+    border-radius: 50%;
+    overflow: hidden;
+    box-shadow: 0 0 0 2px #333, 0 0 60px rgba(0,180,255,0.12);
+  }
+  .hud {
+    width: 640px; height: 400px;
+    position: relative;
+    background: #000;
+    font-family: 'PingFang SC','Microsoft YaHei',monospace;
+  }
+
+  /* 单线导航路线 — 仅一条白线向前延伸 */
+  .route-line {
+    position: absolute;
+    top: 0; left: 0;
+    width: 640px; height: 400px;
+    pointer-events: none;
+    z-index: 5;
+  }
+
+  /* 当前位置 — 屏幕中心下方 */
+  .pos-dot {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 12px; height: 12px;
+    margin: -6px 0 0 -6px;
+    background: var(--dot);
+    border-radius: 50%;
+    box-shadow: 0 0 10px rgba(0,220,255,0.7);
+    z-index: 10;
+  }
+  .pos-triangle {
+    position: absolute; top: 50%; left: 50%;
+    width: 0; height: 0;
+    margin: -20px 0 0 -5px;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 16px solid var(--dot);
+    z-index: 9;
+    transform-origin: center 18px;
+    filter: drop-shadow(0 0 4px rgba(0,220,255,0.5));
+  }
+
+  /* AR 叠加层 */
+  .ar-section {
+    position: absolute;
+    z-index: 20;
+    pointer-events: none;
+  }
+  .ar-arrow {
+    top: 85px; left: 50%; transform: translateX(-50%);
+    font-size: 80px; color: rgba(255,255,255,0.92);
+    text-shadow: 0 0 30px rgba(0,180,255,0.5);
+  }
+  .ar-dist {
+    top: 165px; left: 50%; transform: translateX(-50%);
+    font-size: 42px; font-weight: 700;
+    color: #fff;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.9);
+  }
+  .ar-road {
+    top: 210px; left: 50%; transform: translateX(-50%);
+    font-size: 17px; font-weight: 600;
+    color: #ddd;
+    text-shadow: 0 2px 6px rgba(0,0,0,0.9);
+    white-space: nowrap;
+  }
+
+  /* 顶部状态栏 */
+  .top-bar {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 24px;
+    background: rgba(0,0,0,0.65);
+    display: flex; justify-content: space-between;
+    align-items: center;
+    padding: 0 14px;
+    font-size: 12px; color: #aaa;
+    z-index: 25;
+  }
+
+  /* 底部信息栏 */
+  .bot-bar {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    height: 36px;
+    background: rgba(0,0,0,0.7);
+    display: flex; justify-content: space-around;
+    align-items: center;
+    font-size: 13px; color: #bbb;
+    z-index: 25;
+  }
+  .bot-bar span b { color: #fff; }
+
+  /* 转弯高亮提示 */
+  .turn-highlight {
+    position: absolute;
+    border-radius: 50%;
+    z-index: 6;
+    pointer-events: none;
+  }
+
+  /* 场景切换 */
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .btns button {
+    padding: 8px 16px; border-radius: 8px; border: 1px solid #555;
+    background: #222; color: #ccc; cursor: pointer;
+    font-size: 12px; transition: all 0.2s;
+    font-family: 'PingFang SC','Microsoft YaHei',sans-serif;
+  }
+  .btns button:hover { border-color: #58a6ff; color: #fff; }
+  .btns button.on { background: #1a3a5c; border-color: #58a6ff; color: #fff; }
+
+  /* 车道指示小标 */
+  .lane-hint {
+    position: absolute;
+    z-index: 7;
+    pointer-events: none;
+    font-size: 10px;
+    color: rgba(255,255,255,0.3);
+    background: rgba(255,255,255,0.06);
+    padding: 1px 4px;
+    border-radius: 3px;
+    border: 0.5px solid rgba(255,255,255,0.1);
+  }
+</style>
+</head>
+<body>
+
+<h2>🪖 AR-HUD 最终效果预览 — 单线导航 640×400</h2>
+
+<div class="btns">
+  <button class="on" onclick="showScene('straight')">⬆️ 直行 850m</button>
+  <button onclick="showScene('right')">➡️ 右转 200m</button>
+  <button onclick="showScene('left')">⬅️ 左转 400m</button>
+  <button onclick="showScene('curve')">↗️ 弯道路段</button>
+  <button onclick="showScene('arrived')">🏁 到达</button>
+  <button onclick="showScene('fork')">🔀 匝道分流</button>
+</div>
+
+<div class="desc" id="sceneDesc">直行路段 — 单一白色引导线向前延伸，路面无冗余信息，余光即可读取</div>
+
+<div class="hud-wrap">
+<div class="hud" id="hud">
+
+  <!-- 单线导航路线 SVG -->
+  <svg class="route-line" id="routeSvg">
+  </svg>
+
+  <!-- 转弯高亮 -->
+  <div class="turn-highlight" id="turnHL"></div>
+
+  <!-- 当前位置 -->
+  <div class="pos-dot"></div>
+  <div class="pos-triangle" id="posTri" style="transform: rotate(0deg);"></div>
+
+  <!-- AR 叠加 -->
+  <div class="ar-section ar-arrow" id="arArrow">↑</div>
+  <div class="ar-section ar-dist" id="arDist">850 m</div>
+  <div class="ar-section ar-road" id="arRoad">沿天目山路直行</div>
+
+  <!-- 车道小标 -->
+  <div class="lane-hint" id="laneHint" style="display:none"></div>
+
+  <!-- 顶部状态栏 -->
+  <div class="top-bar">
+    <span style="color:#4f4">⚡ 87%</span>
+    <span style="color:#888">🌐 在线</span>
+    <span style="color:#4f4">📶 GPS:12</span>
+  </div>
+
+  <!-- 底部信息栏 -->
+  <div class="bot-bar">
+    <span>🚲 <b>22.0</b> km/h</span>
+    <span>剩 <b>1.8</b> km</span>
+    <span>约 <b>5</b> min</span>
+  </div>
+
+</div>
+</div>
+
+<div class="desc">
+▲ 3米外等效55寸虚拟成像 | 24°FOV | 半透明画面不遮挡真实路面<br>
+高德骑行SDK单路线输出 → 板子接收 → pygame渲染 → ECX336C Micro OLED
+</div>
+
+<script>
+const scenes = {
+  straight: {
+    desc: '直行路段 — 单一白色引导线向前延伸，路面无冗余信息，余光即可读取',
+    arrow: '↑', dist: '850 m', road: '沿天目山路直行',
+    speed: '22.0', remain: '1.8', eta: '5',
+    heading: 0,
+    route: 'M320,200 L320,160 L315,100 L310,40',
+    turnHL: '',
+    laneHint: ''
+  },
+  right: {
+    desc: '右转路口 — 仅高亮右转分支，直行/左转不绘制，白色主路线明确转向',
+    arrow: '→', dist: '200 m', road: '右转进入黄龙路',
+    speed: '18.5', remain: '3.2', eta: '12',
+    heading: 15,
+    route: 'M320,200 L320,160 L340,130 L390,100 L450,95 L500,90',
+    turnHL: 'top:125px;left:385px;width:18px;height:18px;box-shadow:0 0 14px rgba(255,255,255,0.4);border:2px solid rgba(255,255,255,0.8);',
+    laneHint: 'top:150px;left:295px;display:block;text:直行(不激活)|top:137px;left:375px;display:block;text:→ 右转'
+  },
+  left: {
+    desc: '左转路口 — 前方主线虚化，仅绘制左转白色分支',
+    arrow: '←', dist: '400 m', road: '左转进入文三路',
+    speed: '15.2', remain: '5.6', eta: '22',
+    heading: 340,
+    route: 'M320,200 L320,160 L310,130 L280,100 L250,80 L220,65',
+    turnHL: 'top:125px;left:275px;width:18px;height:18px;box-shadow:0 0 14px rgba(255,255,255,0.4);border:2px solid rgba(255,255,255,0.8);',
+    laneHint: 'top:150px;left:355px;display:block;text:直行(不激活)|top:137px;left:190px;display:block;text:← 左转'
+  },
+  curve: {
+    desc: '弯道路段 — 引导线自然弯曲，前方道路线形清晰可见',
+    arrow: '→', dist: '600 m', road: '沿环城北路前行',
+    speed: '14.0', remain: '4.1', eta: '18',
+    heading: 30,
+    route: 'M320,200 L330,170 Q360,140 400,120 Q450,95 500,75',
+    turnHL: '',
+    laneHint: ''
+  },
+  arrived: {
+    desc: '到达目的地 — 引导线收缩到中心点，显示"已到达"',
+    arrow: '✓', dist: '', road: '',
+    speed: '0', remain: '0', eta: '0',
+    heading: 0,
+    route: 'M320,200 L320,190',
+    turnHL: '',
+    laneHint: ''
+  },
+  fork: {
+    desc: '匝道分流 — 仅高亮匝道出口引导线，其余分支仅小标提示不画线',
+    arrow: '↗', dist: '150 m', road: '右前方进入匝道',
+    speed: '12.5', remain: '2.3', eta: '10',
+    heading: 20,
+    route: 'M320,200 L320,165 L335,145 L370,125 L420,110 L480,95',
+    turnHL: 'top:120px;left:365px;width:18px;height:18px;box-shadow:0 0 14px rgba(255,255,255,0.4);border:2px solid rgba(255,255,255,0.8);',
+    laneHint: 'top:155px;left:340px;display:block;text:直行(不激活)|top:180px;left:390px;display:block;text:→（不激活）|top:140px;left:425px;display:block;text:↗ 匝道'
+  }
+};
+
+function showScene(name) {
+  const s = scenes[name];
+
+  // 按钮状态
+  document.querySelectorAll('.btns button').forEach(b => {
+    b.classList.toggle('on', b.textContent.includes(s.arrow) || b.textContent.includes(name));
+  });
+  // 更精确的按钮匹配
+  const btns = document.querySelectorAll('.btns button');
+  btns.forEach((b, i) => {
+    const keys = ['straight','right','left','curve','arrived','fork'];
+    b.classList.toggle('on', keys[i] === name);
+  });
+
+  // 描述
+  document.getElementById('sceneDesc').textContent = s.desc;
+
+  // AR 文字
+  document.getElementById('arArrow').textContent = s.arrow;
+  document.getElementById('arDist').textContent = s.dist;
+  document.getElementById('arRoad').textContent = s.road;
+
+  // 方向三角旋转
+  document.getElementById('posTri').style.transform = `rotate(${s.heading}deg)`;
+
+  // 路线 SVG
+  document.getElementById('routeSvg').innerHTML = `
+    <polyline points="${s.route.replace(/[ML]/g,'').replace(/Q\s?[\d,.\s]+/g,'')}"
+              fill="none" stroke="rgba(255,255,255,0.82)" stroke-width="3"
+              stroke-linecap="round" stroke-linejoin="round"
+              style="filter:drop-shadow(0 0 6px rgba(255,255,255,0.2))"/>
+  `;
+
+  // 转弯高亮
+  document.getElementById('turnHL').style.cssText = s.turnHL || 'display:none';
+
+  // 车道提示
+  const laneEl = document.getElementById('laneHint');
+  if (s.laneHint) {
+    // 简化：只显示第一条
+    laneEl.style.cssText = 'display:block;position:absolute;z-index:7;font-size:10px;color:rgba(255,255,255,0.3);padding:1px 4px;pointer-events:none;' + s.laneHint.split('|')[0];
+    laneEl.textContent = s.laneHint.split('|')[0].split('text:')[1] || '';
+  } else {
+    laneEl.style.display = 'none';
+  }
+
+  // 底部栏
+  const botBar = document.querySelector('.bot-bar');
+  botBar.innerHTML = `
+    <span>🚲 <b>${s.speed}</b> km/h</span>
+    <span>剩 <b>${s.remain}</b> km</span>
+    <span>约 <b>${s.eta}</b> min</span>
+  `;
+}
+
+showScene('straight');
+</script>
+</body>
+</html>

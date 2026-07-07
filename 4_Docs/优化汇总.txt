@@ -1,0 +1,899 @@
+﻿================================================================================
+  优化汇总 — 2026-07-03
+================================================================================
+
+问题一：重启后 ADB 无法连接  ✅ 已解决
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  板子重启后，adb devices 找不到设备。Windows 设备管理器能看到
+  "ADB Interface" (VID_2207 PID_0019) 但状态为 Unknown。
+
+根因:
+  Windows 上没有 Rockchip 的 ADB 驱动 (Google USB Driver 未安装)。
+  板子重启后，Windows 认出了设备但驱动状态变成 Unknown，ADB 协议栈
+  无法通信。
+
+  为什么之前能连: 之前板子没重启过，驱动一直在内存里没掉。一重启
+  就暴露了。
+
+  为什么 TCP ADB 能连: 板子起来后 adb 守护进程默认监听 5555 端口，
+  即使 WiFi 开了 AP 模式，通过 adb connect <IP>:5555 仍然可以连接。
+
+解决方案:
+  方案 A: 安装 Google USB 驱动（一次性根治）
+    管理员 PowerShell 运行:
+      pnputil /add-driver "C:\Users\wangy\AppData\Local\Temp\google_usb_driver\usb_driver\android_winusb.inf" /install
+    安装后重插 USB 线即可。
+
+  方案 B: 启用 TCP ADB 作为备胎
+    在 S99hudnavi 启动脚本中增加:
+      setprop service.adb.tcp.port 5555
+    以后即使 USB 驱动掉了，只要板子网络通就能无线 ADB。
+
+  建议: 两个都做。方案 A 治本，方案 B 兜底。
+
+
+问题二：重启后 WiFi 未能自动连接（退回了 AP 热点模式）  ✅ 已解决
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  板子重启后 WiFi 地址是 192.168.4.1 (HUD-Setup 热点)，而不是
+  10.203.69.x (连接 Xiaomi 14)。手机 App 连不上板子。
+
+根因:
+  wifi_setup.py 的 _connect_saved() 失败了，然后直接回退到
+  AP 热点模式（192.168.4.1）。失败原因大概率是时序问题——
+  S99hudnavi (S99) 启动时 WiFi 内核模块 (S36load_wifi_modules)
+  还没完全就绪，wpa_supplicant 关联失败或者 DHCP 拿 IP 超时。
+
+  核心问题: 这段代码在 S99hudnavi 里是一次性的，没有重试:
+
+    _connect_saved()  # wpa_supplicant → udhcpc
+      → 失败 → 直接跳到 _start_ap()  # 开了热点就停不下来了
+      → main.py 永远启动不了
+
+  当前启动链:
+    S99hudnavi start
+      → wifi_setup.py (只试一次，失败就开AP永久阻塞)
+        → _connect_saved() 失败 → _start_ap() 永远卡住
+      → 永远到不了 main.py 启动那一步
+
+解决方案:
+  改造 S99hudnavi 启动逻辑:
+
+  1. WiFi 连接和 main.py 启动解耦
+     - main.py 不依赖 WiFi 也能跑（GPS/摄像头/HUD 都独立工作）
+     - WiFi 连不上只是手机 App 连不上，其他功能正常
+
+  2. WiFi 后台持续重试
+     - 如果已有保存的 WiFi 凭据，不要开 AP 热点
+     - wpa_supplicant 挂后台持续扫描重连
+     - 每 10 秒检测一次，连上就停
+
+  3. 增加 WiFi 模块加载等待
+     - S36load_wifi_modules 和 S99hudnavi 之间隔了 60+ 个脚本
+     - 但模块实际就绪可能需要额外时间
+     - 在 wifi_setup.py 调用前 sleep 3 秒缓冲
+
+  4. 重试次数和超时
+     - _connect_saved() 重试 3 次，每次间隔 5 秒
+     - 全部失败后再开 AP 热点
+
+
+问题三：NPU RGA 硬件加速器失效  ✅ 已解决
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  YOLOv5 NPU 推理正常 (55ms/帧)，但检测结果始终为空。
+  SDK 自带测试图 out.jpg 之前能检测到公交车+人，现在也检测不到了。
+  日志显示:
+    RgaBlit(1465) RGA_BLIT fail: Invalid argument
+    srect[x,y,w,h] = [0, 0, 0, 0]  ← 图片预处理后的矩形全零
+
+根因:
+  RGA (瑞芯微硬件2D加速器) 在图像缩放时失败。
+  640x480 → 640x640 letterbox 操作在当前驱动/库版本下不兼容。
+  重启后也无法恢复 (非临时性故障，是驱动级bug)。
+
+影响:
+  图片无法正确预处理 → NPU 收到垃圾数据 → 检测不到任何物体
+
+解决方案:
+  绕过 RGA，改用 CPU 预处理:
+    - 640x480 图片 → PIL Image.resize(640,640) → 约 5-10ms
+    - 预处理后的 640x640 图片送入 NPU 推理 → 55ms
+    - 总耗时约 65ms，帧率从 17fps 降到 15fps
+    - 延迟增加可忽略，不产生冲突（CPU预处理和NPU推理是串行的）
+    - 修改 ai_detect.py 的 detect_vehicles() 函数
+
+
+问题四：EC200A-CN 4G 模块未利用  ⏳ 待 SIM 卡
+──────────────────────────────────────────────────────────────────────────────
+
+实测信息 (2026-07-03 AT指令查询):
+
+  型号:    移远 EC200A-CN (VID 2C7C, PID 6005)
+  固件:    EC200ACNDAR01A18M16
+           - EC200A-CN = 中国全网通版本
+           - DA = 16MB Flash (支持 QuecPython)
+           - R01A18M16 = 固件版本号
+  IMEI:    862051080612237
+  频段:    LTE B1/B3/B5/B8 (0x1e200000095)
+  USB模式: RNDIS 网卡模式 (usbnet=1)
+  接口:    Mini PCIe, 插在 RK3568 内部 USB 总线
+  端口:    /dev/ttyUSB0 (DM调试), /dev/ttyUSB1 (AT), /dev/ttyUSB2 (AT)
+  信号:    CSQ 16 (约 -75dBm, 有信号覆盖)
+  SIM卡:   ❌ 未插入 (QSIMSTAT: 0,1)
+  GNSS:    ❌ 不支持 (型号不含N, 焊位空的)
+
+插入 SIM 卡后可用功能:
+
+  [核心] 4G 上网         → usb0 接口获取公网IP, 替代WiFi, 实现真正户外独立运行
+  [核心] HTTP/HTTPS      → 手机 App 通过 4G 连接板子, 不受 WiFi 范围限制
+  [扩展] 短信收发        → AT+CMGS 发送短信报警 (危险检测 → 自动短信通知)
+  [扩展] VoLTE 通话      → 外接麦克风+喇叭即可拨打/接听 4G 高清电话
+  [扩展] MQTT 上云       → 设备数据上报物联网平台, 远程监控骑行状态
+  [扩展] 基站定位        → AT+QENG 获取基站 LAC/CID, 无 GPS 时的粗略位置备选
+  [扩展] QuecPython      → 刷 QPY 固件后模块可独立运行 Python 脚本, 不占 RK3568 资源
+
+当前状态: 模块硬件正常、信号正常、固件正常。只差一张 SIM 卡。
+
+
+问题五：NPU 检测输出格式不兼容  ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象: CPU 预处理后 NPU 推理正常 (58ms)，但 detect_vehicles() 返回 0 个检测。
+根因: 标签文件加载后，demo 输出格式从 "2 0.819 116 234 206 519" 变为
+      "person @ (114 238 212 524) 0.819099"，_parse_output 只处理数字格式。
+解决: 重写 _parse_output 兼容两种格式。
+
+问题六：NPU Demo 基准测试开销  ⏳ 待优化
+──────────────────────────────────────────────────────────────────────────────
+
+现象: 单次 detect_vehicles() 耗时 ~900ms，NPU 实际推理只要 58ms。
+根因: rknn_yolov5_demo 每次启动都重新加载模型+跑10轮循环基准。
+影响: AI 帧率限制在 ~1 FPS。
+方案: 改用 RKNN Python API 直调，预计总耗时 70ms → 14 FPS。
+
+问题七：新固件刷机后组件检查清单 (防止遗漏)
+──────────────────────────────────────────────────────────────────────────────
+
+[必备] Python 3.11        — 新固件裸系统无Python, 需micromamba安装
+[必备] pip包              — pygame pyserial Pillow edge-tts zhconv dbus-next gtts
+[必备] /opt/hud_navi/*.py — 全部源码文件
+[必备] /data/yolo/        — yolov5s-640-640.rknn + rknn_yolov5_demo + lib/
+[必备] /data/whisper/     — whisper .rknn + rknn_whisper_demo + lib/
+[必备] /etc/wpa_supplicant.conf + /etc/init.d/S99hudnavi + watchdog.sh
+[必备] /dev/ttyS8 (GPS) + /dev/video23 (摄像头, 必须插GPS口)
+[可选] /dev/ttyUSB1-2 (EC200 AT端口) + usb0 (EC200 RNDIS网卡)
+
+
+================================================================================
+  代码审查与优化 — 2026-07-03 (导航模块专项)
+================================================================================
+
+审查范围: 基础导航模块
+  map_api_c, route_planner_b, config, main, nav_state, http_server,
+  wifi_setup, smart_features, voice_alert_c, road_safety, gps_reader_a
+
+修复优先级分类: [致命] > [高危] > [中危]
+
+──────────────────────────────────────────────────────────────────────────────
+问题八：main.py _plan_route() 冷却逻辑重复  [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  _plan_route() 方法中, 路径规划失败的30秒冷却保护代码出现了两次
+  (第248行和第262行), 导致双倍延迟。
+
+根因:
+  代码合并/重构时重复粘贴。
+
+修复:
+  删除第二个重复的冷却检查块, 只保留一个。
+  线上预降级后直接进入 Provider 调用, 无需再次冷却判断。
+
+
+问题九：main.py analyze_route([]) 永远传入空列表  [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  第293行: safety = analyze_route([])
+  传入空列表导致 road_safety 永远返回默认值 "🟡 注意行驶",
+  道路安全分析功能完全失效。
+
+根因:
+  参数遗漏, 应该传入实际的 route_steps。
+
+修复:
+  改为: safety = analyze_route(route_steps)
+  路线规划成功后使用实际路线步骤进行安全分析。
+
+
+问题十：main.py 优雅关闭时 ble.stop() 空指针崩溃  [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  第574行: ble.stop() 当 ble 被显式设为 None 时崩溃 (AttributeError)。
+  BLE 暂未启用, 但 finally 优雅关闭路径仍会调用 ble.stop()。
+
+修复:
+  改为: if ble: ble.stop()
+  同时增加 hud.stop() 的 try/except 异常保护 (HUD可能未初始化)。
+
+
+问题十一：nav_state.py 缺少 sensor_fusion 写入字段  [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  sensor_fusion.py 写入 s.fused_position、s.fused_heading、
+  s.fusion_confidence 等字段, 但这些字段不存在于 NavState dataclass,
+  会导致 AttributeError 运行时崩溃。
+
+修复:
+  在 NavState 中新增6个传感器融合字段:
+    fused_position, fused_heading, fusion_confidence,
+    fusion_active, dead_reckoning_active, dead_reckoning_remaining
+  同步更新 get_snapshot() 的拷贝逻辑。
+
+
+问题十二：config.py 屏幕分辨率配置错误 + 缺少融合配置  [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  1. SCREEN_WIDTH = 800, SCREEN_HEIGHT = 1280 — 这是手机分辨率
+     实际 SONY ECX336C HUD 屏幕是 640×400
+  2. sensor_fusion.py 引用了16个配置常量, 但 config.py 中全部缺失
+
+修复:
+  1. 改为 SCREEN_WIDTH = 640, SCREEN_HEIGHT = 400
+  2. 新增16个传感器融合 + IMU 配置常量:
+       FUSION_OUTPUT_HZ, FUSION_GPS_WEIGHT, FUSION_IMU_WEIGHT,
+       FUSION_VO_WEIGHT, FUSION_DEAD_RECKONING_MAX_SEC, ...
+       IMU_I2C_BUS, IMU_I2C_ADDR, IMU_SAMPLE_RATE, ...
+  3. PC版和Board版同步更新
+
+
+问题十三：map_api_c.py requests.Session.timeout 无效  [高危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  self._session.timeout = 10 对 requests.Session 对象无效 —
+  Session.timeout 不是 requests 库的标准属性, 超时需要通过
+  session.request(url, timeout=N) 逐个传入。
+
+修复:
+  1. 改为 self._default_timeout = 10 存储默认超时值
+  2. 各请求方法已通过 timeout=N 参数正确设置 (无需额外改动)
+
+额外优化:
+  check_network() 双通道检测: 优先检测 HTTPS 443 端口,
+  失败再试 HTTP 80 端口 (高德API走HTTPS, 443更可靠)
+
+
+问题十四：route_planner_b.py 导航引擎多个缺陷  [高危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+缺陷1: _distance_along_step() 距离估算过于粗糙
+  原算法: 只计算当前点到步骤第一个点的直线距离
+  修复: 找到步骤 polyline 上的最近线段, 累加从起点到该线段的路径距离
+
+缺陷2: _last_instruction 变量从未被使用 (死代码)
+  修复: 删除无用变量, 改为 _last_voice_step_idx 跟踪已播报的步骤索引
+
+缺陷3: 语音播报去重逻辑有漏洞
+  原逻辑: 布尔标志 _voice_alerted, 重置条件苛刻
+  修复: 步骤索引跟踪, 每步只播报一次, 进入新步骤自动重置
+
+缺陷4: else 分支 Python 运算符优先级不明确
+  原: raw_instruction or f"沿{road}直行" if road else "沿当前道路直行"
+  修复: (raw_instruction or f"沿{road}直行") if road else "沿当前道路直行"
+
+
+问题十五：wifi_setup.py 无重试机制 + 进程管理问题  [高危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  _connect_saved() 只尝试一次, 失败直接开AP热点阻塞启动流程。
+  _switch() 使用 os._exit(0) 暴力终止进程。
+
+修复:
+  1. WiFi模块就绪等待: run_setup() 入口 sleep(3) 缓冲
+  2. 连接重试: _connect_saved() 最多重试3次, 间隔5秒
+  3. DHCP重试: 每次连接内 DHCP 重试3次 (udhcpc -t 5 -n)
+  4. 优雅退出: _switch() 用 sys.exit(0) 替代 os._exit(0)
+  5. 总体: 3×3=9次尝试后才回退到AP模式
+
+
+问题十六：smart_features.py 数据持久化四个风险  [中危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+缺陷1: JSON文件非原子写入
+  进程崩溃/断电时文件可能损坏 (写到一半被中断)
+  修复: _atomic_write() 使用 tempfile + os.replace 原子替换
+
+缺陷2: ride_end() 从未被调用
+  导航到达目的地后没有保存骑行记录 (功能缺失)
+  修复: main.py 到达检测中增加 ride_end() 调用
+
+缺陷3: 数据无界增长
+  ride_log.json 和 rides/ 目录无限追加, 数月后可能GB级
+  修复: 日志上限1000条, 单次文件上限200个, 常用地点上限100条
+
+缺陷4: os.makedirs() 在模块导入时执行
+  只读文件系统上 import smart_features 直接崩溃
+  修复: 延迟到首次写入时创建目录, 失败静默降级
+
+
+问题十七：voice_alert_c.py 转向WAV永远不播放  [中危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  _try_wav() 中 "左转"/"右转"/"掉头"/"直行" 全部设为 fname=None,
+  导致所有导航转向提示跳过WAV播放, 直接降级到蜂鸣 (跳过了一级降级)
+
+修复:
+  改为指向现有的通用WAV文件:
+    左转/右转/掉头 → cmd_quxiao.wav (通用提示)
+    直行/开始导航 → cmd_ok.wav
+    到达目的地 → all_done.wav
+  配合蜂鸣降级形成有效的二级降级链 (EdgeTTS → WAV → Beep)
+
+
+问题十八：http_server.py 端口清理不兼容BusyBox  [中危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  start_server() 使用 fuser -k 清理端口, 但 BusyBox 版 fuser
+  不支持 -k 参数, 清理静默失败。
+
+修复:
+  增加 fallback: fuser -k 失败后用 netstat + awk + kill 兜底清理。
+  两种方式都捕获异常, 避免清理失败阻塞 HTTP 服务启动。
+
+
+================================================================================
+  语音模块审查与优化 — 2026-07-03
+================================================================================
+
+审查范围: 语音输入/输出/识别/声纹/TTS全链路
+  voice_command.py, voice_auth.py, whisper_asr.py, voice_alert_c.py,
+  tts_edge.py, speak_helper.py, speak_util.py, audio_manager.py
+
+──────────────────────────────────────────────────────────────────────────────
+问题十九：tts_edge.py socket.getaddrinfo全局猴子补丁 [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  模块导入时执行 `socket.getaddrinfo = _getaddrinfo_v4only`,
+  强制所有 socket 调用走 IPv4。导致:
+  - map_api_c.py 的 requests Session 被强制 IPv4
+  - http_server 的 HTTPServer 被强制 IPv4
+  - 进程内任何其他模块的 IPv6 连接全部失效
+
+根因:
+  板子 WiFi IPv6 到微软 Azure TTS 服务器不稳定, 开发时用全局补丁
+  快速解决, 但这个副作用污染了所有模块。
+
+修复:
+  1. 删除模块级全局猴子补丁
+  2. 改为 `_force_ipv4_for_edge_tts()` 返回原始函数引用
+  3. `_generate_async()` 内部临时替换 → finally 立即恢复
+  4. 确保 AMap API/HTTP Server 等其他模块不受影响
+
+
+问题二十：voice_alert_c.py EdgeTTS重复创建实例 [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  `_try_speak_helper()` 每次调用都 `EdgeTTS()` 新建实例,
+  `_pre_cache()` 也为每条缓存 `EdgeTTS()` 新建实例。
+  每次实例化: 检查 edge-tts 是否导入 + 创建播放器 + 网络检查。
+
+修复:
+  1. 新增 `_get_edge_tts()` 单例方法 (延迟初始化)
+  2. `_try_speak_helper()` 使用 `tts.save_to_file()` 代替手动缓存管理
+  3. `_pre_cache()` 复用同一个 EdgeTTS 实例
+  4. 支持 audio_manager 动态音频设备路由
+
+
+问题二十一：whisper_asr.py NPU检测跑完整推理 [高危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  `_check_npu()` 执行 `subprocess.run([BINARY, "--help"])` 启动完整
+  推理二进制 (~500ms启动+模型检测), 仅为了检查NPU是否可用。
+
+修复:
+  改为纯文件检查: 检查 binary 存在+可执行 + encoder/decoder模型 +
+  lib 目录存在。零进程开销, 毫秒级完成。
+
+额外:
+  `import zhconv` 从函数内移到模块级 (避免每次 audio_to_text 调用都重复import)
+
+
+问题二十二：voice_auth.py 录音并发安全 + 阈值不一致 [高危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  1. `verify()` 未使用 `audio_lock`, 与 `listen_and_execute()` 同时
+     调用 arecord 导致设备忙错误
+  2. `is_owner()` 阈值0.90, `listen_loop` 阈值0.70, 不一致导致
+     listen_loop 通过但 is_owner 拒绝
+  3. `verify()` JSON 加载无异常处理, 文件损坏即崩溃
+
+修复:
+  1. `verify()` 加 `with audio_lock` 保护录音设备互斥访问
+  2. 统一阈值: verify() 默认 0.70, is_owner() 用 0.85 (安全操作)
+  3. JSON 加载加 try/except 防损坏崩溃
+
+
+问题二十三：voice_command.py JSON损坏崩溃 + 冗余导入 [高危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  1. `listen_and_execute()` 和 `listen_loop()` 中 `json.load(CMD_FILE)`
+     无异常处理, 文件写入中断导致损坏时直接崩溃整个语音线程
+  2. 函数内 `import json as _j` 冗余 (模块顶部已导入)
+  3. `recognize()` 无 `audio_lock`
+
+修复:
+  1. 所有 `json.load()` 加 try/except (JSONDecodeError, ValueError)
+  2. 删除函数内冗余 `import json as _j`
+  3. `recognize()` 加 `with audio_lock`
+
+
+问题二十四：speak_helper.py tts_edge模块缺失崩溃 [中危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  PC版 speak_helper.py 引用 `from tts_edge import EdgeTTS`,
+  但 tts_edge.py 只存在于 Board 目录。PC 端 import 直接崩溃。
+
+修复:
+  1. `_get_tts()` 增加 `_tts_import_checked` 标志
+  2. ImportError/AttributeError 捕获后标记不可用, 不再重试
+  3. 新增 `from config import TTS_EDGE_VOICE` 的异常保护
+
+
+问题二十五：语音命令响应慢(说完话到听到回复需15秒) [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  用户说"导航到安徽建筑大学"→听到"开始导航"回复要等约15秒。
+  体验很差, 感觉系统没反应。
+
+根因分析 (时间分解):
+  1. listen_and_execute() 录音 10 秒 — 导航命令实际只需2-3秒说完
+  2. Whisper NPU 推理 2-5 秒 — 需等待子进程完成
+  3. Edge-TTS 生成语音 1-2 秒 — "开始导航"等确认语需联网下载
+  4. 无即时反馈 — 用户在录音+推理期间看不到/听不到任何反馈
+  总计: 10 + 3 + 2 = ~15秒
+
+修复 (三管齐下):
+  1. 录音时长 10s → 5s: "导航到安徽建筑大学"只需~2.5秒, 留2秒缓冲足够
+     → 节省 5秒
+  2. 即时反馈 beep: 检测到人声后立即播放短促确认音(0.08秒)
+     → 用户立刻知道"系统听到了, 正在处理", 体验从"没反应"变成"在工作"
+  3. 确认语音 WAV 优先: voice_alert_c._loop() 将预录WAV提到Edge-TTS之前
+     → "开始导航"等确认语用WAV即时播放(0延迟), 不用等Edge-TTS网络下载
+     → 节省 2秒
+
+效果:
+  修复前: 录音10s + NPU 3s + EdgeTTS 2s = ~15秒才能听到回复
+  修复后: 0.1s听到beep → 5s录音 → NPU 3s → WAV即时 = ~8秒听到完整回复
+  (beep在0.1秒内响, 用户体验从"没反应"变成"秒响应")
+
+
+问题二十六：hud_display_c.py 模块级 import pygame 崩溃  [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  main.py 启动时即使 HUD 被禁用 (SKIP_HUD=True), 进程仍然崩溃:
+    pygame.error: Unable to make EGL context current (EGL_BAD_ACCESS)
+
+根因:
+  hud_display_c.py 第7行 `import pygame, pygame.gfxdraw` 在模块导入时执行。
+  pygame 导入时自动尝试初始化 GPU (Mali EGL), 板子 SDL2/Wayland/Mali
+  版本不兼容导致 EGL_BAD_ACCESS。即使 HUD 从未使用, 只要 import 就崩溃。
+
+修复:
+  1. 删除模块级 `import pygame`, 改为 delay import
+  2. init_pygame() 内 `global pygame; import pygame`
+  3. 效果: HUD 禁用时 pygame 完全不会被加载, 进程不崩
+
+以后是否再出现:
+  不会再出现。延迟导入是永久性修复, 任何模块都不应在顶层导入 pygame。
+
+
+问题二十七：PowerShell→ADB→BusyBox 三层引号冲突 [高危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  adb shell "python -c 'print(\"ok\")'" 报 syntax error
+  adb shell "nohup python main.py &" 进程无法后台运行
+
+根因:
+  PowerShell → Windows CLI → ADB daemon → BusyBox sh 四层传递,
+  每层对单引号(')、双引号(")、反斜杠(\)、美元符号($)的解释规则不同。
+  复杂命令的引号会被逐层剥离, 到达 BusyBox 时面目全非。
+
+修复:
+  1. 创建 deploy.sh / restart.sh 脚本文件, adb push 到板子
+  2. 命令写进脚本 → adb shell "sh script.sh", 彻底绕过引号嵌套
+  3. CLAUDE.md 增加部署说明: 永远用脚本文件, 不要在 adb shell 里写复杂命令
+
+以后是否再出现:
+  会再遇到。每次需要复杂命令时, 必须用脚本文件方式, 这是 BusyBox 的固有限制。
+
+
+问题二十八：BusyBox aplay 不支持小数秒时长 [中危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  aplay: main:653: invalid duration argument '0.08'
+  _play_ack_beep() 确认音播放失败
+
+根因:
+  BusyBox 版 aplay 的 -d 参数只接受整数秒, 不接受 "0.08" 这种小数。
+  标准 ALSA aplay 支持小数, 但嵌入式 BusyBox 裁剪掉了。
+
+修复:
+  voice_command.py _play_ack_beep() 中 dur 从 0.08 改为 1 (最短整数秒)。
+  确认 beep 仍能在 0.1 秒内响 (实际上 aplay 忽略 -d 参数, 用管道输入长度决定)。
+
+
+问题二十九：ADB shell 后台进程存活问题 [已记录]
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  adb shell "nohup python main.py &" 看似启动成功, 但 ADB 断开后进程立即死亡。
+
+根因:
+  BusyBox 的 sh 在交互式 shell 退出时会向所有子进程发送 SIGHUP。
+  nohup 理论上应该阻止, 但 BusyBox 精简版 nohup 行为不一致。
+
+解决方案:
+  1. 开发时推送: 用 deploy.sh 脚本推代码, 然后通过 init 脚本或 reboot 启动
+  2. 快速重启: adb shell "/etc/init.d/S99hudnavi restart"
+  3. 开机自启: S99hudnavi 在 boot 时由 init 进程启动, 不需要 ADB shell
+
+
+问题三十：PowerShell Set-Content UTF-8 BOM 损坏中文源码 [中危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+现象:
+  voice_command.py 推送后报错:
+    SyntaxError: invalid non-printable character U+E18D
+    DEFAULT_COMMANDS = ["鍘诲叕鍙?, ...]  ← 中文全变乱码
+
+根因:
+  PowerShell `Set-Content -Encoding UTF8` 会在文件头写入 BOM (Byte Order
+  Mark, \xEF\xBB\xBF)。Python 3 在 Linux 上不会自动跳过 BOM, 导致第一行
+  代码被污染, 所有中文字符串解析失败。
+
+修复:
+  1. 推送代码时直接用 `adb push` 原始文件 (不经过 PowerShell 文本处理)
+  2. 如需修改文件内容, 在板子上用 `sed -i` 修改
+  3. 如必须在 PC 修改, 用 `Out-File -Encoding utf8NoBOM`
+
+以后是否再出现:
+  会。任何经过 PowerShell 文本处理后再 push 的中文文件都可能被加 BOM。
+  规则: PC 上只做语法检查 → 原始文件 adb push → 板子上 sed 修改。
+
+
+问题三十一：Whisper NPU 驱动版本不兼容 [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+现象: Whisper 模型加载报 Invalid RKNN model version 6, 识别始终返回空
+根因: 板子 NPU 驱动 v1.4.0, 模型需要 v2.x。交付包中有 v2.3.2 驱动未部署
+修复: /usr/lib/librknnrt.so 替换为 v2.3.2 (3.5MB→7.7MB)
+
+
+问题三十二：Vosk 离线语音识别替代 Whisper [重大优化] ✅ 已部署
+──────────────────────────────────────────────────────────────────────────────
+Whisper base 模型中文准确度仅 ~20%, 且需要 NPU。Vosk 替代方案:
+  - 模型: vosk-model-small-cn-0.22 (66MB, 纯CPU)
+  - 准确度: 显著优于 Whisper base
+  - 延迟: ~0.3s vs Whisper 2.5s
+  - 依赖: pip install vosk + libvosk.so ARM64
+  - 集成: hud_vosk.py 封装, voice_command.py 调用
+
+
+问题三十三：Piper TTS 离线语音合成 [重大优化] ✅ 已部署
+──────────────────────────────────────────────────────────────────────────────
+原 Edge-TTS 需上外网(手机热点连不上微软服务器)。Piper 替代:
+  - 模型: zh_CN-huayan-medium.onnx (60MB)
+  - 音质: 真人声, 离线, ARM64原生
+  - 集成: hud_tts.py → voice_alert_c.py 优先 Piper
+  - 语音播报链路: Piper → WAV → Beep
+
+板子部署后语音:
+  "我在" (唤醒反馈) + "前方XX米右转" (导航指令) — 纯离线真人声
+
+
+问题三十四：语音唤醒词"小正小正" [+ 同音字容错] ✅ 已部署
+──────────────────────────────────────────────────────────────────────────────
+- 唤醒词: 小正小正/小正/小镇小镇/小镇/小郑小郑/小真小真/小政小政
+- 录音: 2秒 (快速响应)
+- 命令窗口: 10秒
+- 反馈音: Piper 生成 "我在" → start_speak.wav
+- 流程: "小正小正" → "我在" → 说命令 → 执行
+
+
+问题三十五：Shell guard + start-stop-daemon 进程守护 [高危] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+守护进程反复死亡问题:
+  - Python double-fork 在 BusyBox 上不可靠
+  - nohup & 在 ADB Shell 退出时杀子进程
+  - 最终方案: Shell死循环 guard.sh + start-stop-daemon 管理
+  - guard.sh: while true; do python main.py >> log; sleep 10; done
+  - S99hudnavi: start-stop-daemon -b -m -p /tmp/hud.pid -x /bin/sh -- guard.sh
+
+
+问题三十六：PowerShell UTF-8 BOM 损坏中文源码 [致命] ✅ 已解决
+	  ✅ 问题三十七: HUD显示修复        — 绕过Mali GPU, 软件渲染+drm_show直显 (HUD显示)
+──────────────────────────────────────────────────────────────────────────────
+PowerShell Set-Content -Encoding utf8 写入 BOM, push 后中文变乱码。
+永久方案: build_vc.py 在板子上用 Python 直接生成 voice_command.py,
+不经过 PC 文件传输。所有中文修改都在板子端完成。
+
+================================================================================
+完成度总览 (2026-07-03 最终更新)
+──────────────────────────────────────────────────────────────────────────────
+  ✅ 问题一:   ADB 掉驱动         — Google USB Driver 安装步骤已记录
+  ✅ 问题二:   WiFi 不自动连      — S99hudnavi V3: 后台重试+不阻塞+看门狗守护
+  ✅ 问题二附: 后台进程存活       — start-stop-daemon + init守护, 重启自启验证通过
+  ✅ 问题三:   RGA 硬件失效       — CPU预处理(PIL→640×640), 58ms推理, 零RGA错误
+  ✅ 问题五:   输出格式兼容       — _parse_output 兼容数字ID/类别名两种格式
+  ✅ 问题七:   speak_helper       — 从V2.0补到V3.0, 固件检查仅缺此文件
+  ✅ 问题八:   重复冷却代码       — 删除重复块, 防止双倍延迟 (代码审查)
+  ✅ 问题九:   analyze_route空参  — 传入实际route_steps, 恢复道路安全分析 (代码审查)
+  ✅ 问题十:   ble.stop()空指针   — 增加None检查+异常保护 (代码审查)
+  ✅ 问题十一: NavState缺融合字段 — 新增6个sensor_fusion字段 (代码审查)
+  ✅ 问题十二: config分辨率错误   — 640×400 + 16个融合/IMU配置补齐 (代码审查)
+  ✅ 问题十三: Session超时无效    — 修正超时设置 + 双通道(HTTPS/HTTP)网络检测 (代码审查)
+  ✅ 问题十四: 导航引擎多缺陷     — 距离计算+语音去重+运算符+死代码 (代码审查)
+  ✅ 问题十五: WiFi无重试机制     — 3次连接重试+DHCP×3+模块等待+优雅退出 (代码审查)
+  ✅ 问题十六: 数据持久化风险     — 原子写入+上限保护+ride_end调用延迟创建 (代码审查)
+  ✅ 问题十七: 转向WAV不播放      — 指向通用WAV, 恢复二级降级链 (代码审查)
+  ✅ 问题十八: HTTP端口清理       — fuser+netstat双保险 (代码审查)
+  ✅ 问题十九: socket全局补丁      — 局部IPv4强制, 恢复其他模块IPv6 (语音审查)
+  ✅ 问题二十: EdgeTTS重复实例     — 单例复用 + audio_manager路由 (语音审查)
+  ✅ 问题二十一: NPU检测开销       — 纯文件检查替代推理进程启动 (语音审查)
+  ✅ 问题二十二: 录音并发安全      — audio_lock保护 + 统一阈值 (语音审查)
+  ✅ 问题二十三: JSON损坏崩溃      — 全链路异常处理 + 冗余导入清理 (语音审查)
+  ✅ 问题二十四: tts_edge缺失      — 导入保护 + 不再重试 (语音审查)
+  ✅ 问题二十五: 语音响应慢        — 录音10s→5s + beep即时反馈 + WAV优先 (语音审查)
+  ✅ 问题二十六: pygame EGL崩溃     — 延迟导入, HUD禁用时不加载GPU (部署调试)
+  ✅ 问题二十七: 三层引号冲突       — deploy.sh/restart.sh脚本化 (部署调试)
+  ✅ 问题二十八: aplay小数秒        — 0.08s→1s, BusyBox兼容 (部署调试)
+  ✅ 问题二十九: ADB进程保活        — init脚本启动, 避坑记录 (部署调试)
+  ✅ 问题三十:   UTF-8 BOM损坏      — build_vc.py板子端生成, 永久方案 (部署调试)
+  ✅ 问题三十一: NPU驱动版本        — v1.4.0→v2.3.2, Whisper→Vosk (语音模块)
+  ✅ 问题三十二: Vosk离线ASR        — 66MB, 纯CPU, 中文准确 (语音模块)
+  ✅ 问题三十三: Piper TTS          — 60MB, 离线真人声 (语音模块)
+  ✅ 问题三十四: 唤醒词机制         — "小正小正"+同音字, 2秒响应 (语音模块)
+  ✅ 问题三十五: 进程守护           — Shell guard + start-stop-daemon (系统)
+  ✅ 问题三十六: PS编码损坏         — build_vc.py板子端生成 (部署调试)
+  ⏳ 问题四:   EC200 4G           — 硬件正常, 只差SIM卡
+  ⏳ 问题六:   NPU帧率优化        — 改用RKNN Python API, 目标14 FPS
+
+  完成: 46/48 项
+  ─ 导航模块: 11 | 语音模块: 13 | 部署调试: 7 | 系统: 2 | HUD显示: 5 | AI摄像头: 4 | 网络: 1 | 系统: 2
+
+
+问题三十七：ECX336C OLED HUD 显示系统 — 全链路诊断与根治 [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+
+环境: RK3568 + Mali-G52(wayland变体) + Linux 4.19.232 + ECX336C Micro OLED
+物理面板: 640x400 | HDMI输出: 1280x720 (TuTuLink驱动板EDID)
+渲染引擎: SDL2 2.32.0 dummy驱动(纯CPU) + drm_show C程序(DRM直显)
+
+现象:
+  初装: ECX336C 显示"未连接", 屏幕灰绿色无内容
+  调试中: HUD显示约30-40秒 → 切换到Weston"初始化界面" → 反复循环
+  纯HUD测试: 1121帧180秒零错误(drm_show+软件渲染完全稳定)
+  main.py全线程: HUD在GPS冷启动结束后(约35s)崩溃/被覆盖
+
+══════════════════════════════════════════════════════════════
+根因分析 (四层问题叠加):
+══════════════════════════════════════════════════════════════
+
+[根因A] Mali-G52 GPU page flip 不兼容 Linux 4.19
+  - libmali是wayland变体(libmali-bifrost-g52-g2p0-wayland.so)
+  - DRM atomic page flip 在4.19内核上对HDMI-A-1返回Invalid argument
+  - Weston, SDL2-KMSDRM, EGL均无法通过GPU渲染到屏幕
+  - 只有modetest的legacy SETCRTC可以显示(绕过GPU)
+  → 解决: 完全绕过GPU, 使用SDL2 dummy软件渲染 + CPU绘制
+
+[根因B] S03weston 开机自启服务抢占DRM
+  - /etc/init.d/S03weston 在S99hudnavi之前启动(Debian runlevel顺序)
+  - Weston启动后占用DRM framebuffer, 显示"初始化界面"
+  - 即使drm_show拿到DRM master, Weston的framebuffer仍可覆盖
+  → 解决: mv S03weston → S03weston.disabled + guard.sh启动时killall weston
+
+[根因C] drm_show stderr管道缓冲区泄漏
+  - 最初drm_show每帧写"FR\n"到stderr作为帧确认
+  - Python端从不读取stderr → 64KB管道缓冲填满 → drm_show阻塞
+  → 解决: stderr→subprocess.DEVNULL
+
+[根因D] main.py信号处理导致进程自杀
+  - 旧版signal_handler设置_shutdown_flag=True → main.py收到信号就退出
+  - drm_show崩溃时pipe写触发SIGPIPE → 杀死main.py → HUD消失
+  → 解决: SIGPIPE→SIG_IGN, signal_handler改为pass(guard.sh管理生命周期)
+
+══════════════════════════════════════════════════════════════
+子问题 (按调试时间线):
+══════════════════════════════════════════════════════════════
+
+[子问题1] SDL2选错输出口
+  - HDMI-A-1(TuTuLink)和LVDS-1(内屏)都报connected
+  - SDL2按DRM枚举顺序选LVDS-1(800x1280)而非HDMI-A-1(1280x720)
+  - 交叉编译SDL2 2.32.0 + LVDS skip补丁(Bootlin GCC 10.3)
+  → 最终: 不用SDL2选口, drm_show直接用connector 156 + CRTC 71
+
+[子问题2] drm_show间歇性崩溃
+  - 原因: read()可能返回部分字节(4字节帧头只读到2字节)
+  → 修复: read_full()循环读取直到读满指定字节数
+
+[子问题3] Python _emit_frame内存泄漏
+  - pygame.image.tostring()每帧创建3.6MB bytes对象
+  - 30fps × 3.6MB = 108MB/s垃圾 → 内存从80MB涨到290MB+
+  → 缓解: 删除逐像素Python循环(改为C端RGBA→XR24转换)
+    drm_show零拷贝直接读入mmap'd framebuffer
+
+[子问题4] _vignette2x每帧分配14.7MB Surface
+  - 2560x1440 RGBA Surface每帧new → 440MB/s分配
+  → 修复: 预分配Surface + 日夜模式缓存复用
+
+[子问题5] 旧guard.sh进程无法杀死
+  - 多次调试中旧guard.sh积压(包含killall drm_show代码)
+  - 每5秒杀一次drm_show → HUD反复消失
+  → 修复: 必须重启板子清理 + 重写guard.sh
+
+══════════════════════════════════════════════════════════════
+最终架构:
+══════════════════════════════════════════════════════════════
+
+S99hudnavi → guard.sh
+  ├─ killall -9 weston (清屏)
+  ├─ HUD线程(drm_show子进程, 异常保护永不死)
+  │    └─ drm_show (DRM dumb buffer + legacy SETCRTC → HDMI)
+  └─ main.py (导航/语音/HTTP, 崩了guard.sh自动重启)
+
+渲染管线: SDL2 dummy → Surface(2560x1440) → smoothscale(1280x720)
+          → RGBA bytes → pipe → drm_show → RGBA→XR24(C端)
+          → mmap'd framebuffer → legacy SETCRTC → HDMI → ECX336C
+
+关键参数:
+  - 管道最大帧率: 6.3fps (300帧48秒实测)
+  - drm_show CPU: ~65-98% (取决于RGBA→XR24转换频率)
+  - Python渲染CPU: ~70-120% (取决于导航状态复杂度)
+  - 内存稳态: ~100-170MB (有2x缩放+vignette缓存)
+
+文件变更:
+  新增:
+    drm_show              — 静态ARM64 C程序(727KB), DRM dumb buffer显示
+    _drm_show.c           — C源码, 交叉编译脚本
+    hud_render.py         — (已废弃, HUD合回main.py线程)
+    _build_sdl2_wsl.sh    — SDL2交叉编译脚本(Bootlin GCC 10.3)
+  修改:
+    hud_display_c.py      — V3.2: KMSDRM→dummy, pipe→DEVNULL, 异常永不死
+    guard.sh              — kill weston + 启动hud_render.py + main.py守护
+    main.py               — SIGPIPE→IGN, signal_handler→pass, HUD线程注释
+    config.py             — SCREEN_WIDTH=1280, SCREEN_HEIGHT=720
+  禁用:
+    /etc/init.d/S03weston — mv → S03weston.disabled (永久禁用Weston自启)
+
+
+
+问题三十八：GPS卫星数红蓝闪烁 — 颜色逻辑与在线蓝点视觉重叠 ✅ 已优化
+──────────────────────────────────────────────────────────────────────────────
+现象: 顶部GPS信号点颜色在绿/黄/红间快速跳变, 与在线蓝点重叠呈"紫色"
+原因: GPS冷启动卫星数波动(0→3→5→8), 颜色频繁切换; 在线蓝点与红点视觉混叠
+解决: 移除顶部多余GPS点, 卫星数仅显示在底部栏GPS列, 与在线蓝点分离
+
+
+问题三十九：drm_show 连续模式背景闪烁 — 橙蓝交替 [致命] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+现象: HUD橙色背景与蓝色交替闪烁, modetest测试图案不闪
+根因: drm_show连续模式直接在mmap显示缓冲区上读取+RGBA→XR24转换,
+      显示控制器在转换过程中扫描到未初始化的buffer(蓝色)或半转换数据
+      → 每帧都经历"蓝→橙"的视觉闪烁
+诊断: 单帧模式(pause住)完全不闪 → 确认问题在连续循环的buffer操作
+解决: 双缓冲架构 — malloc独立后备缓冲区, 读取+转换在后备区完成,
+      最后memcpy一次性拷贝到显示framebuffer, 显示控制器永远只看到完整帧
+效果: CPU从~90%降至~7%, 零闪烁
+
+
+
+
+问题四十一：S99hudnavi 进程累积永久修复 — 旧guard.sh杀不死 [严重] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+现象: 重启/调试后 guard.sh + main.py 数量不断累积,
+      操作系统killall无法杀死sleep中的shell进程, 导致资源抢占
+根因: ① BusyBox killall按进程名匹配(guard.sh), 但进程实际名为/bin/sh, 不匹配
+      ② 旧S99hudnavi只读PID文件杀一个进程, 无法清理多次start产生的实例
+      ③ 多次调试中反复killall python3+S99hudnavi start造成积压
+解决: S99hudnavi重写启动逻辑 —
+      ① kill -9 $(cat /tmp/hud.pid) → 杀PID文件记录的进程
+      ② ps | grep guard.sh | while read p; do kill -9 $p; done → 扫描所有guard.sh
+      ③ killall -9 python3 drm_show weston → 清理子进程
+      ④ sleep 2 → 等进程完全退出
+      ⑤ start-stop-daemon → 启动唯一新实例
+文件: /etc/init.d/S99hudnavi (重写), /opt/hud_navi/guard.sh (简化)
+问题四十：进程累积 — 多次调试重启导致重复进程抢占资源 [严重] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+现象: 多次killall + S99hudnavi start后, guard.sh/main.py/drm_show数量
+      不断增加(观察: 4个guard.sh + 6个main.py + 3个drm_show同时运行)
+影响:
+  - 多个main.py抢占GPS串口 /dev/ttyS8 → "device disconnected"错误
+  - 多个drm_show抢夺DRM master → 画面异常
+  - 内存/CPU成倍消耗
+原因: 调试中反复 killall python3 + S99hudnavi start, 旧guard.sh处于
+      sleep状态时无法被killall杀死, 醒来后继续启动main.py
+解决: S99hudnavi启动前扫描杀所有旧guard.sh + kill PID文件 + killall python/drm/weston
+      极端情况需重启板子清理所有旧进程
+
+
+
+问题四十三：WiFi IP 地址不固定 — DHCP 随机分配 [体验] ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+现象: 每次重启板子 WiFi IP 在 10.203.69.x 范围随机变化(.232/.161/.160)
+影响: 手机 App 需要每次手动输入新 IP 才能连接
+原因: S99hudnavi 使用 udhcpc(DHCP客户端)获取动态 IP
+解决: 替换为静态 IP — wpa_supplicant 关联 WiFi 后,
+      改 ifconfig wlan0 10.203.69.160 + route add default gw 10.203.69.101
+      跳过 udhcpc, IP 永久固定
+问题四十二：HUD配色升级 — 暗沉灰色→竞速橙 [体验] ✅ 已完成
+──────────────────────────────────────────────────────────────────────────────
+原配色: 冷炭灰底色(16,19,22), 偏暗偏土, 户外不可见
+新配色: 竞速橙底色(200,80,0) + 白色文字, 运动仪表风格
+  C_BG=(200,80,0) 全屏橙底 | C_ARROW/C_DIST=(255,255,255)纯白
+  C_BOT=(220,210,200)浅灰 | C_BAR_BG=(160,50,0,180)深橙栏
+优化: 移除椭圆暗角(_ellipse2x), 删除透明预填充, 清理死代码
+
+
+
+问题四十四：语音反馈系统 —导航全流程语音播报 ✅ 已完成
+──────────────────────────────────────────────────────────────────────────────
+新增 Piper TTS 语音反馈覆盖导航全流程:
+  · 语音导航: "开始导航到XXX"
+  · 语音取消: "导航已取消"
+  · GPS定位: "GPS定位完成" / "GPS信号弱"
+  · 系统就绪: "骑行导航已就绪"
+  · 超速提醒: "超速，请减速"
+  · 偏航提醒: "已偏离路线，正在重新规划"
+  · 到达: "已到达目的地"
+TTS与语音命令共享audio_lock防冲突 (hud_tts.py修改)
+禁用启动时GPS/就绪播报(太吵)
+
+
+问题四十五：摄像头AI模块集成 — USB相机+YOLOv5s NPU ✅ 已完成
+──────────────────────────────────────────────────────────────────────────────
+硬件: USB UVC摄像头 /dev/video23 + RK3568 NPU(1TOPS)
+模型: YOLOv5s (yolov5s-640-640.rknn), COCO 80类, 推理59ms
+功能: 检测后方车辆(汽车/卡车/公交/摩托), 4级预警→语音+HUD
+修复:
+  · 推送NPU模型+标签文件到 /data/yolo/
+  · camera_manager 从流式→单帧拍照(500ms), 解决v4l2-ctl持续流崩溃
+  · ai_monitor 导入修复(全局camera单例)
+  · main.py 集成(sys.path+摄像头初始化6行代码)
+文件: camera_manager.py(296行,单帧版), ai_monitor.py, ai_alert.py, ai_detect.py
+
+
+问题四十六：语音唤醒词优化 — Vosk灵敏度+速度调优 ✅ 已完成
+──────────────────────────────────────────────────────────────────────────────
+  · RECORD_SEC: 2s→1s (响应快一倍)
+  · 唤醒词: "小"字开头即触发(startswith), 兼容Vosk误识别
+  · RMS阈值: baseline×1.5→1.3, 下限0.003→0.0015
+  · 声纹验证: 已集成voice_auth, 录音冲突后回退(待USB音频稳定)
+
+
+问题四十七：aplay小数秒+Piper TTS锁 ✅ 已修复
+──────────────────────────────────────────────────────────────────────────────
+  · aplay不支持小数duration参数→改为整数秒
+  · Piper TTS播放加audio_lock防与语音命令录音冲突
+
+================================================================================
